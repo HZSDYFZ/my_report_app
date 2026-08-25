@@ -18,8 +18,36 @@ def extract_first_person(lead_str):
     s = str(lead_str).strip()
     s = re.sub(r"^(审核组长|组长|Lead)[:：]\s*", "", s, flags=re.IGNORECASE)
     s = re.sub(r"[\（\(].*?[\）\)]", "", s).strip()
-    parts = re.split(r"[ ,，/、+&\t\n]+", s)
+    parts = re.split(r"[ ,，/／、+&\t\n]+", s)
     return parts[0] if parts and parts[0] else ""
+
+def clean_date_val(val):
+    """【新增】将 Excel 评定日期序列号或文本转换为标准的 YYYY-MM-DD 格式"""
+    if pd.isna(val):
+        return ""
+    if isinstance(val, (pd.Timestamp, datetime)):
+        return val.strftime("%Y-%m-%d")
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() in ["nan", "none", "null", "nat", "0", "undefined"]:
+        return ""
+    # 处理 Excel 数字日期序列号（如 46113）
+    try:
+        f_val = float(val_str)
+        if 30000 < f_val < 60000:
+            dt = pd.to_datetime(f_val, unit='D', origin='1899-12-30')
+            return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        pass
+    
+    # 尝试直接用 pandas 解析日期文本
+    try:
+        dt = pd.to_datetime(val_str)
+        if not pd.isna(dt):
+            return dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+        
+    return val_str.split(" ")[0]
 
 def get_clean_col_val(row, possible_keys, default=""):
     """表头多别名模糊匹配"""
@@ -31,20 +59,18 @@ def get_clean_col_val(row, possible_keys, default=""):
                 val = row[col]
                 if pd.isna(val):
                     continue
-                if isinstance(val, (pd.Timestamp, datetime)) or "date" in type(val).__name__.lower():
-                    return str(val).split(" ")[0]
                 val_str = str(val).strip()
                 if val_str and val_str.lower() not in ["nan", "none", "null", "nat", "0", "undefined"]:
-                    return val_str
+                    return val
     return default
 
 def is_real_data_row(row):
     """过滤 Excel 尾部无效空行"""
     if row.dropna().empty:
         return False
-    comp = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default="")
-    task = get_clean_col_val(row, ["任务号", "合同号", "项目编号"], default="")
-    lead = get_clean_col_val(row, ["审核组长", "组长", "审核员", "组长姓名"], default="")
+    comp = str(get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default=""))
+    task = str(get_clean_col_val(row, ["任务号", "合同号", "项目编号"], default=""))
+    lead = str(get_clean_col_val(row, ["审核组长", "组长", "审核员", "组长姓名"], default=""))
 
     invalid_words = ["", "nan", "none", "null", "未知企业", "未填写", "0"]
     if comp.lower() in invalid_words and task.lower() in invalid_words and lead.lower() in invalid_words:
@@ -55,13 +81,15 @@ def is_real_data_row(row):
 
 def process_row_data(row, index):
     """单行 Excel 数据解析"""
-    company_name = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default="")
-    task_no = get_clean_col_val(row, ["任务号", "合同号", "项目编号", "单号"], default="")
+    company_name = str(get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default=""))
+    task_no = str(get_clean_col_val(row, ["任务号", "合同号", "项目编号", "单号"], default=""))
     lead_raw = get_clean_col_val(row, ["审核组长", "组长", "审核员", "组长姓名", "lead", "姓名"], default="")
-    address = get_clean_col_val(row, ["审核地址", "地址", "企业地址", "注册地址"], default="")
-    scope = get_clean_col_val(row, ["审核范围", "认证范围", "范围", "业务范围"], default="")
-    audit_type_raw = get_clean_col_val(row, ["审核类型", "类型", "审核阶段"], default="")
-    eval_date = get_clean_col_val(row, ["评定日期", "决定日期", "日期", "评审日期", "评定时间", "通过时间"], default="")
+    address = str(get_clean_col_val(row, ["审核地址", "地址", "企业地址", "注册地址"], default=""))
+    scope = str(get_clean_col_val(row, ["审核范围", "认证范围", "范围", "业务范围"], default=""))
+    audit_type_raw = str(get_clean_col_val(row, ["审核类型", "类型", "审核阶段"], default=""))
+    
+    eval_date_raw = get_clean_col_val(row, ["评定日期", "决定日期", "日期", "评审日期", "评定时间", "通过时间"], default="")
+    eval_date = clean_date_val(eval_date_raw)
 
     lead_first = extract_first_person(lead_raw)
 
@@ -91,7 +119,7 @@ def process_row_data(row, index):
     }
 
 def update_paragraph_checkboxes(p, data):
-    """文本框及普通段落占位符与复选框替换"""
+    """文本框及普通段落占位符与复选框、日期替换"""
     text = p.text
     if not text.strip():
         return
@@ -115,6 +143,10 @@ def update_paragraph_checkboxes(p, data):
     for k, v in replacements.items():
         if k in text:
             text = text.replace(k, str(v))
+
+    # 【新增】精准替换段落中的日期：后面内容
+    if "日期" in text and data["eval_date"]:
+        text = re.sub(r"(日期[：:])\s*.*", r"\1" + data["eval_date"], text)
 
     if "16949" in text:
         sym = "☑" if data["has_ts"] else "☐"
@@ -168,7 +200,7 @@ def format_decision_options(cell, data):
         p.text = mark + clean_text
 
 def process_table_safely(table, data):
-    """表格安全遍历，严格区分：公司/任务号在同单元格冒号后，组长在后一个格子"""
+    """表格安全遍历"""
     visited_tcs = set()
 
     for row in table.rows:
@@ -181,7 +213,7 @@ def process_table_safely(table, data):
             cell_text = cell.text.strip()
             clean_text = re.sub(r"[\s:：]", "", cell_text)
 
-            # 内部占位符替换
+            # 内部占位符与日期替换
             for p in cell.paragraphs:
                 update_paragraph_checkboxes(p, data)
 
@@ -206,15 +238,12 @@ def process_table_safely(table, data):
                     p.text = f"审核地址：{data['address']}"
                 elif "认证范围：" in p_clean or "认证范围:" in p_clean:
                     p.text = f"认证范围：{data['scope']}"
-                elif "日期：" in p_clean and not p_clean.endswith(data['eval_date']):
-                    if any(kw in p_clean for kw in ["报告评定人员", "专业支持人员", "审批"]):
-                        prefix_text = p.text.split("日期：")[0]
-                        p.text = f"{prefix_text}日期：{data['eval_date']}"
 
             # 5. 表格内的单独日期格子
             if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间"]:
                 if "：" in cell_text or ":" in cell_text:
-                    cell.paragraphs[0].text = f"日期：{data['eval_date']}"
+                    # 如果单元格自带“日期：”，在后面填上正确日期
+                    cell.paragraphs[0].text = re.sub(r"(日期[：:])\s*.*", r"\1" + data['eval_date'], cell.paragraphs[0].text)
 
             # 6. 认证决定结论选项勾选
             if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
