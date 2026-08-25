@@ -33,7 +33,6 @@ def clean_date_val(val):
     if not val_str or val_str.lower() in ["nan", "none", "null", "nat", "0", "undefined"]:
         return ""
     
-    # 严格匹配纯数字日期，绝不碰带 P 的表单号
     match = re.search(r'(\d{2,4})[-–‑—](\d{1,2})[-–‑—](\d{1,2})', val_str)
     if match:
         groups = match.groups()
@@ -88,7 +87,7 @@ def remove_invisible_chars(text):
     return re.sub(r'[\u200b\u200c\u200d\u00ad\ufeff]', '', text)
 
 def process_paragraph_text(p, data):
-    """处理段落文本（绝对保护 P 开头的表单编号行）"""
+    """处理段落文本：精准把日期粘贴到“日期：”后面，绝对不碰后面的编号"""
     try:
         raw_text = p.text
     except Exception:
@@ -97,10 +96,6 @@ def process_paragraph_text(p, data):
         return
 
     text = remove_invisible_chars(raw_text)
-    
-    # 🛡️ 核心安全网：如果段落中包含类似 P26-01-15 的表单编号，严禁对其进行任何日期替换！
-    has_form_code = bool(re.search(r'P\d+[-–‑—]\d+[-–‑—]\d+', text, re.IGNORECASE))
-
     chinese_date = format_chinese_date(data["eval_date"])
 
     # 1. 常规占位符替换
@@ -124,11 +119,12 @@ def process_paragraph_text(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 2. 只有在不包含表单编号的情况下，才安全地填充日期
-    if chinese_date and not has_form_code:
+    # 2. 精准定位“日期：”，只把紧跟其后的下划线或旧日期替换为新日期，完美保留右侧的 P26-01-15 编号
+    if chinese_date:
         for prefix in ["评定日期", "评审日期", "决定日期", "日期", "评定通过时间"]:
             if prefix in text:
-                pattern = r'(' + prefix + r'\s*[：:]\s*)([____\s\d年月日\-\./]*)'
+                # 匹配 prefix + 冒号 + 后面紧跟的（下划线、空格、或旧日期字符串），绝不向后多吃其他字符
+                pattern = r'(' + prefix + r'\s*[：:])\s*([_—\s]*|\d{4}[年\-\./]\d{1,2}[月\-\./]\d{1,2}日?)'
                 text = re.sub(pattern, r'\1' + chinese_date, text)
 
     # 3. 复选框状态更新
@@ -218,13 +214,11 @@ def process_table_safely(table, data):
                 elif "认证范围：" in p_clean or "认证范围:" in p_clean:
                     p.text = f"认证范围：{data['scope']}"
 
-            # 检查表格单元格是否为纯日期标签且不含表单号
             if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间", "通过日期"]:
                 chinese_date = format_chinese_date(data["eval_date"])
                 if cell.paragraphs and chinese_date:
-                    cell_full_text = "".join([p.text for p in cell.paragraphs])
-                    if not re.search(r'P\d+[-–‑—]\d+[-–‑—]\d+', cell_full_text, re.IGNORECASE):
-                        cell.paragraphs[0].text = f"日期：{chinese_date}"
+                    for p in cell.paragraphs:
+                        process_paragraph_text(p, data)
 
             if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
                 format_decision_options(cell, data)
