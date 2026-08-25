@@ -87,18 +87,15 @@ def remove_invisible_chars(text):
     return re.sub(r'[\u200b\u200c\u200d\u00ad\ufeff]', '', text)
 
 def process_paragraph_text(p, data):
-    """处理段落文本：精准把日期粘贴到“日期：”后面，绝对不碰后面的编号"""
+    """逐个 Run 进行精准替换，绝对不破坏 Word 的排版、Tab 键及右侧表单编号"""
     try:
-        raw_text = p.text
+        if not p.text.strip():
+            return
     except Exception:
         return
-    if not raw_text.strip():
-        return
 
-    text = remove_invisible_chars(raw_text)
     chinese_date = format_chinese_date(data["eval_date"])
 
-    # 1. 常规占位符替换
     replacements = {
         "{{公司名称}}": data["company_name"],
         "{{任务号}}": data["task_no"],
@@ -115,37 +112,54 @@ def process_paragraph_text(p, data):
         "【评定日期】": chinese_date,
         "【评定通过时间】": chinese_date,
     }
-    for k, v in replacements.items():
-        if k in text:
-            text = text.replace(k, str(v))
 
-    # 2. 精准定位“日期：”，只把紧跟其后的下划线或旧日期替换为新日期，完美保留右侧的 P26-01-15 编号
-    if chinese_date:
-        for prefix in ["评定日期", "评审日期", "决定日期", "日期", "评定通过时间"]:
-            if prefix in text:
-                # 匹配 prefix + 冒号 + 后面紧跟的（下划线、空格、或旧日期字符串），绝不向后多吃其他字符
-                pattern = r'(' + prefix + r'\s*[：:])\s*([_—\s]*|\d{4}[年\-\./]\d{1,2}[月\-\./]\d{1,2}日?)'
-                text = re.sub(pattern, r'\1' + chinese_date, text)
+    # 核心优化：只修改包含目标文字的 Run 片段，保留整个段落的底层结构、Tab 和后续的编号
+    for run in p.runs:
+        run_text = remove_invisible_chars(run.text)
+        if not run_text:
+            continue
+        
+        modified = False
 
-    # 3. 复选框状态更新
-    if "16949" in text:
-        sym = "☑" if data["has_ts"] else "☐"
-        text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", text, flags=re.I)
-    if "9001" in text:
-        sym = "☑" if data["has_er"] else "☐"
-        text = re.sub(r"[□☐☑✔]\s*(ISO\s*9001)", f"{sym} \\1", text, flags=re.I)
-    if "初审" in text:
-        sym = "☑" if ("初" in data["audit_type_raw"] and "监" not in data["audit_type_raw"]) else "☐"
-        text = re.sub(r"[□☐☑✔]\s*(初审)", f"{sym} \\1", text)
-    if "监审" in text:
-        sym = "☑" if "监" in data["audit_type_raw"] else "☐"
-        text = re.sub(r"[□☐☑✔]\s*(监审)", f"{sym} \\1", text)
-    if "再认证" in text or "转移" in text:
-        sym = "☑" if ("再认证" in data["audit_type_raw"] or "转移" in data["audit_type_raw"]) else "☐"
-        text = re.sub(r"[□☐☑✔]\s*(再认证/转移)", f"{sym} \\1", text)
+        # 1. 替换常规占位符
+        for k, v in replacements.items():
+            if k in run_text:
+                run_text = run_text.replace(k, str(v))
+                modified = True
 
-    if text != raw_text:
-        p.text = text
+        # 2. 精准将日期写在“日期：”后面
+        if chinese_date:
+            for prefix in ["评定日期", "评审日期", "决定日期", "日期", "评定通过时间"]:
+                if prefix in run_text:
+                    pattern = r'(' + prefix + r'\s*[：:])\s*([_—\s]*|\d{4}[年\-\./]\d{1,2}[月\-\./]\d{1,2}日?)'
+                    if re.search(pattern, run_text):
+                        run_text = re.sub(pattern, r'\1' + chinese_date, run_text)
+                        modified = True
+
+        # 3. 复选框状态更新
+        if "16949" in run_text:
+            sym = "☑" if data["has_ts"] else "☐"
+            run_text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", run_text, flags=core_re_flags := re.I)
+            modified = True
+        if "9001" in run_text:
+            sym = "☑" if data["has_er"] else "☐"
+            run_text = re.sub(r"[□☐☑✔]\s*(ISO\s*9001)", f"{sym} \\1", run_text, flags=re.I)
+            modified = True
+        if "初审" in run_text:
+            sym = "☑" if ("初" in data["audit_type_raw"] and "监" not in data["audit_type_raw"]) else "☐"
+            run_text = re.sub(r"[□☐☑✔]\s*(初审)", f"{sym} \\1", run_text)
+            modified = True
+        if "监审" in run_text:
+            sym = "☑" if "监" in data["audit_type_raw"] else "☐"
+            run_text = re.sub(r"[□☐☑✔]\s*(监审)", f"{sym} \\1", run_text)
+            modified = True
+        if "再认证" in run_text or "转移" in run_text:
+            sym = "☑" if ("再认证" in data["audit_type_raw"] or "转移" in data["audit_type_raw"]) else "☐"
+            run_text = re.sub(r"[□☐☑✔]\s*(再认证/转移)", f"{sym} \\1", run_text)
+            modified = True
+
+        if modified:
+            run.text = run_text
 
 def fill_next_target_cell(cells, current_idx, value):
     """基于底层 XML 单元格定位标签格后面紧挨着的下一个独立单元格"""
