@@ -166,7 +166,7 @@ def update_paragraph_checkboxes(p, data):
 
     if "16949" in text:
         sym = "☑" if data["has_ts"] else "☐"
-        text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", text, flags=I if 'I' in globals() else re.I)
+        text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", text, flags=re.I)
     if "9001" in text:
         sym = "☑" if data["has_er"] else "☐"
         text = re.sub(r"[□☐☑✔]\s*(ISO\s*9001)", f"{sym} \\1", text, flags=re.I)
@@ -277,7 +277,7 @@ def fill_word_template(template_bytes, data):
     for table in doc.tables:
         process_table_safely(table, data)
 
-    # 3. 【绝对核心】通过 XML 强行遍历全文所有隐藏在【文本框 (w:txbxContent)】中的段落与表格
+    # 3. 强行遍历全文所有隐藏在【文本框 (w:txbxContent)】中的段落与表格
     for p_elem in doc.element.xpath('//w:txbxContent//w:p'):
         p = Paragraph(p_elem, doc)
         update_paragraph_checkboxes(p, data)
@@ -285,17 +285,17 @@ def fill_word_template(template_bytes, data):
         table = Table(tbl_elem, doc)
         process_table_safely(table, data)
 
-    # 4. 处理页眉和页脚（包括其中的段落、表格及文本框）
+    # 4. 处理页眉和页脚（包括其中的段落、表格及文本框，注意使用 ._element 访问底层元素）
     for section in doc.sections:
         # 页眉
         for p in section.header.paragraphs:
             update_paragraph_checkboxes(p, data)
         for table in section.header.tables:
             process_table_safely(table, data)
-        for p_elem in section.header.element.xpath('.//w:txbxContent//w:p'):
+        for p_elem in section.header._element.xpath('.//w:txbxContent//w:p'):
             p = Paragraph(p_elem, doc)
             update_paragraph_checkboxes(p, data)
-        for tbl_elem in section.header.element.xpath('.//w:txbxContent//w:tbl'):
+        for tbl_elem in section.header._element.xpath('.//w:txbxContent//w:tbl'):
             table = Table(tbl_elem, doc)
             process_table_safely(table, data)
             
@@ -304,10 +304,10 @@ def fill_word_template(template_bytes, data):
             update_paragraph_checkboxes(p, data)
         for table in section.footer.tables:
             process_table_safely(table, data)
-        for p_elem in section.footer.element.xpath('.//w:txbxContent//w:p'):
+        for p_elem in section.footer._element.xpath('.//w:txbxContent//w:p'):
             p = Paragraph(p_elem, doc)
             update_paragraph_checkboxes(p, data)
-        for tbl_elem in section.footer.element.xpath('.//w:txbxContent//w:tbl'):
+        for tbl_elem in section.footer._element.xpath('.//w:txbxContent//w:tbl'):
             table = Table(tbl_elem, doc)
             process_table_safely(table, data)
 
