@@ -24,7 +24,7 @@ def extract_first_person(lead_str):
     return parts[0] if parts and parts[0] else ""
 
 def clean_date_val(val):
-    """将 Excel 日期序列号、P26-04-01 或文本统一转换为 YYYY-MM-DD 格式（兼容所有 Word 连字符）"""
+    """将 Excel 日期序列号、P26-04-01 或文本统一转换为 YYYY-MM-DD 格式"""
     if pd.isna(val):
         return ""
     if isinstance(val, (pd.Timestamp, datetime)):
@@ -33,7 +33,6 @@ def clean_date_val(val):
     if not val_str or val_str.lower() in ["nan", "none", "null", "nat", "0", "undefined"]:
         return ""
     
-    # 兼容标准减号及 Word 各种特殊连字符（-、–、‑、—）
     match = re.search(r'P?(\d{2,4})[-–‑—](\d{2})[-–‑—](\d{2})', val_str, re.IGNORECASE)
     if match:
         groups = match.groups()
@@ -42,7 +41,6 @@ def clean_date_val(val):
         else:
             return f"20{groups[0]}-{groups[1]}-{groups[2]}"
 
-    # 处理 Excel 数字日期序列号（如 46113）
     try:
         f_val = float(val_str)
         if 30000 < f_val < 60000:
@@ -51,7 +49,6 @@ def clean_date_val(val):
     except ValueError:
         pass
     
-    # 尝试用 pandas 解析常规日期文本
     try:
         dt = pd.to_datetime(val_str)
         if not pd.isna(dt):
@@ -91,7 +88,7 @@ def is_real_data_row(row):
         return False
     return True
 
-def process_row_data(row, index):
+def process_row_data(row, index, fallback_date=""):
     """单行 Excel 数据解析"""
     company_name = str(get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default=""))
     task_no = str(get_clean_col_val(row, ["任务号", "合同号", "项目编号", "单号"], default=""))
@@ -102,6 +99,9 @@ def process_row_data(row, index):
     
     eval_date_raw = get_clean_col_val(row, ["评定通过时间", "评定日期", "决定日期", "日期", "评审日期", "评定时间", "通过时间", "通过日期", "完成日期"], default="")
     eval_date = clean_date_val(eval_date_raw)
+    
+    if not eval_date:
+        eval_date = fallback_date
 
     lead_first = extract_first_person(lead_raw)
 
@@ -130,14 +130,23 @@ def process_row_data(row, index):
         "eval_date": eval_date
     }
 
+def remove_invisible_chars(text):
+    """清除 Word 文本中常见的零宽空格、软连字符等隐藏控制字符"""
+    if not text:
+        return ""
+    return re.sub(r'[\u200b\u200c\u200d\u00ad\ufeff]', '', text)
+
 def update_paragraph_checkboxes(p, data):
-    """文本框及普通段落占位符与复选框、日期替换（强制替换所有旧日期代码）"""
+    """文本框及普通段落占位符与复选框、日期替换（强制穿透隐藏字符）"""
     try:
-        text = p.text
+        raw_text = p.text
     except Exception:
         return
-    if not text.strip():
+    if not raw_text.strip():
         return
+
+    # 清洗隐藏字符用于匹配
+    text = remove_invisible_chars(raw_text)
 
     replacements = {
         "{{公司名称}}": data["company_name"],
@@ -159,10 +168,11 @@ def update_paragraph_checkboxes(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 【终极强制替换】无论前面带着什么前缀（如“专业支持人员：”或“日期：”），只要匹配到 P26-01-15 等代号，一律原地替换成计算出的正确日期
+    # 【终极核心修复】兼容带隐藏字符的 P26-01-15 形式代号
     if data["eval_date"]:
-        text = re.sub(r'P?\d{2,4}[-–‑—]\d{2}[-–‑—]\d{2}', data["eval_date"], text)
-        text = re.sub(r"(日期[：:])\s*([^\s]*)", r"\1" + data["eval_date"], text)
+        # 匹配 P 后面带有各种分隔符和数字的模式（如 P26-01-15）
+        text = re.sub(r'P\s*\d{2,4}\s*[-–‑—]\s*\d{2}\s*[-–‑—]\s*\d{2}', data["eval_date"], text, flags=re.I)
+        text = re.sub(r'(日期[：:])\s*([^\s]*)', r'\1' + data["eval_date"], text)
 
     if "16949" in text:
         sym = "☑" if data["has_ts"] else "☐"
@@ -180,11 +190,11 @@ def update_paragraph_checkboxes(p, data):
         sym = "☑" if ("再认证" in data["audit_type_raw"] or "转移" in data["audit_type_raw"]) else "☐"
         text = re.sub(r"[□☐☑✔]\s*(再认证/转移)", f"{sym} \\1", text)
 
-    if text != p.text:
+    if text != raw_text:
         p.text = text
 
 def fill_next_target_cell(cells, current_idx, value):
-    """基于底层 XML 单元格(_tc)精准定位标签格后面紧挨着的下一个独立单元格（用于审核组长）"""
+    """基于底层 XML 单元格定位标签格后面紧挨着的下一个独立单元格"""
     if not str(value).strip():
         return
     current_tc = cells[current_idx]._tc
@@ -226,90 +236,67 @@ def process_table_safely(table, data):
                 continue
             visited_tcs.add(cell._tc)
 
-            cell_text = cell.text.strip()
+            cell_text = remove_invisible_chars(cell.text.strip())
             clean_text = re.sub(r"[\s:：]", "", cell_text)
 
-            # 内部段落替换
             for p in cell.paragraphs:
                 update_paragraph_checkboxes(p, data)
 
-            # 1. 公司名称 -> 填在“公司名称：”后面
             if clean_text in ["公司名称", "客户名称", "企业名称"]:
                 if cell.paragraphs:
                     cell.paragraphs[0].text = f"公司名称：{data['company_name']}"
 
-            # 2. 任务号 -> 填在“任务号：”后面
             elif clean_text in ["任务号", "合同号"]:
                 if cell.paragraphs:
                     cell.paragraphs[0].text = f"任务号：{data['task_no']}"
 
-            # 3. 审核组长 -> 填在后面一个格子里面
             elif (clean_text in ["审核组长", "组长"]) and "报告评定人员" not in clean_text:
                 fill_next_target_cell(cells, idx, data['lead'])
 
-            # 4. 段落中的地址、范围匹配
             for p in cell.paragraphs:
-                p_clean = re.sub(r"\s+", "", p.text)
+                p_clean = re.sub(r"\s+", "", remove_invisible_chars(p.text))
                 if "审核地址：" in p_clean or "审核地址:" in p_clean:
                     p.text = f"审核地址：{data['address']}"
                 elif "认证范围：" in p_clean or "认证范围:" in p_clean:
                     p.text = f"认证范围：{data['scope']}"
 
-            # 5. 表格内的单独日期单元格处理
             if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间", "通过日期"]:
                 if cell.paragraphs and data["eval_date"]:
                     cell.paragraphs[0].text = re.sub(r"(日期[：:])\s*([^\s]*)", r"\1" + data['eval_date'], cell.paragraphs[0].text)
                     if "：" not in cell.paragraphs[0].text and ":" not in cell.paragraphs[0].text:
                         cell.paragraphs[0].text = f"日期：{data['eval_date']}"
 
-            # 6. 认证决定结论选项勾选
             if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
                 format_decision_options(cell, data)
 
 def fill_word_template(template_bytes, data):
     doc = Document(io.BytesIO(template_bytes))
 
-    # 1. 处理正文所有段落
-    for p in doc.paragraphs:
-        update_paragraph_checkboxes(p, data)
+    def process_container(container):
+        for p in container.paragraphs:
+            update_paragraph_checkboxes(p, data)
+        for table in container.tables:
+            process_table_safely(table, data)
+        for p_elem in container._element.xpath('.//w:txbxContent//w:p'):
+            p = Paragraph(p_elem, doc)
+            update_paragraph_checkboxes(p, data)
+        for tbl_elem in container._element.xpath('.//w:txbxContent//w:tbl'):
+            table = Table(tbl_elem, doc)
+            process_table_safely(table, data)
 
-    # 2. 处理正文所有表格
-    for table in doc.tables:
-        process_table_safely(table, data)
+    process_container(doc)
 
-    # 3. 强行遍历全文所有隐藏在【文本框 (w:txbxContent)】中的段落与表格
-    for p_elem in doc.element.xpath('//w:txbxContent//w:p'):
-        p = Paragraph(p_elem, doc)
-        update_paragraph_checkboxes(p, data)
-    for tbl_elem in doc.element.xpath('//w:txbxContent//w:tbl'):
-        table = Table(tbl_elem, doc)
-        process_table_safely(table, data)
-
-    # 4. 处理页眉和页脚（包括其中的段落、表格及文本框，注意使用 ._element 访问底层元素）
     for section in doc.sections:
-        # 页眉
-        for p in section.header.paragraphs:
-            update_paragraph_checkboxes(p, data)
-        for table in section.header.tables:
-            process_table_safely(table, data)
-        for p_elem in section.header._element.xpath('.//w:txbxContent//w:p'):
-            p = Paragraph(p_elem, doc)
-            update_paragraph_checkboxes(p, data)
-        for tbl_elem in section.header._element.xpath('.//w:txbxContent//w:tbl'):
-            table = Table(tbl_elem, doc)
-            process_table_safely(table, data)
-            
-        # 页脚
-        for p in section.footer.paragraphs:
-            update_paragraph_checkboxes(p, data)
-        for table in section.footer.tables:
-            process_table_safely(table, data)
-        for p_elem in section.footer._element.xpath('.//w:txbxContent//w:p'):
-            p = Paragraph(p_elem, doc)
-            update_paragraph_checkboxes(p, data)
-        for tbl_elem in section.footer._element.xpath('.//w:txbxContent//w:tbl'):
-            table = Table(tbl_elem, doc)
-            process_table_safely(table, data)
+        hf_list = [
+            section.header, section.footer,
+            section.first_page_header, section.first_page_footer,
+            section.even_page_header, section.even_page_footer
+        ]
+        for hf in hf_list:
+            try:
+                process_container(hf)
+            except Exception:
+                pass
 
     out_stream = io.BytesIO()
     doc.save(out_stream)
@@ -319,11 +306,14 @@ def fill_word_template(template_bytes, data):
 # Streamlit 界面
 st.title("📄 认证评定报告自动化生成系统")
 
-c1, c2 = st.columns(2)
+c1, c2, c3 = st.columns(3)
 with c1:
-    excel_file = st.file_uploader("1. 上传认证 Excel 数据文件 (.xlsx / .xls)", type=["xlsx", "xls"])
+    excel_file = st.file_uploader("1. 上传认证 Excel 数据文件", type=["xlsx", "xls"])
 with c2:
-    template_file = st.file_uploader("2. 上传 Word 报告模板 (.docx)", type=["docx"])
+    template_file = st.file_uploader("2. 上传 Word 报告模板", type=["docx"])
+with c3:
+    default_date_input = st.date_input("3. 默认评定日期（Excel无日期时使用）", value=datetime.today())
+    fallback_date_str = default_date_input.strftime("%Y-%m-%d")
 
 st.markdown("---")
 
@@ -332,7 +322,7 @@ if excel_file is not None and template_file is not None:
         raw_df = pd.read_excel(excel_file)
         template_bytes = template_file.getvalue()
 
-        parsed_records = [process_row_data(row, idx) for idx, row in raw_df.iterrows() if is_real_data_row(row)]
+        parsed_records = [process_row_data(row, idx, fallback_date_str) for idx, row in raw_df.iterrows() if is_real_data_row(row)]
 
         if not parsed_records:
             st.warning("⚠️ Excel 文件中未读取到有效数据。")
@@ -366,4 +356,4 @@ if excel_file is not None and template_file is not None:
     except Exception as e:
         st.error(f"处理失败: {str(e)}")
 else:
-    st.info("👈 请上传对应的 Excel 和 Word 模板文件进行处理。")
+    st.info("👈 请按顺序上传 Excel、Word 模板，并在右侧确认默认日期后开始处理。")
