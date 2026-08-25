@@ -12,13 +12,13 @@ st.set_page_config(page_title="认证评定报告自动化生成系统", page_ic
 BOX_PATTERN = re.compile(r"^[□☐☑✔\[\]口\s]+")
 
 def extract_first_person(lead_str):
-    """提取审核组长姓名（保留原始正确逻辑）"""
+    """提取审核组长姓名"""
     if pd.isna(lead_str) or not str(lead_str).strip():
         return ""
     s = str(lead_str).strip()
     s = re.sub(r"^(审核组长|组长|Lead)[:：]\s*", "", s, flags=re.IGNORECASE)
     s = re.sub(r"[\（\(].*?[\）\)]", "", s).strip()
-    parts = re.split(r"[ ,，/、+&\t\n]+", s)
+    parts = re.split(r"[ ,,\/、+&\t\n]+", s)
     return parts[0] if parts and parts[0] else ""
 
 def get_clean_col_val(row, possible_keys, default=""):
@@ -136,23 +136,19 @@ def update_paragraph_checkboxes(p, data):
         p.text = text
 
 def fill_next_target_cell(cells, current_idx, value):
-    """【核心规则】严格将数据填入标签格子后面紧挨着的一个或有效空白格子中"""
+    """【核心修复】基于底层 XML 单元格(_tc)精准定位标签格后面紧挨着的下一个独立单元格"""
     if not str(value).strip():
         return
-    # 优先寻找紧挨着的下一个单元格
-    if current_idx + 1 < len(cells):
-        target_cell = cells[current_idx + 1]
-        if target_cell.paragraphs:
-            target_cell.paragraphs[0].text = str(value)
-            return
-    # 兜底：如果相邻格被合并或跳过，向后顺延查找第一个可用格
+    current_tc = cells[current_idx]._tc
     for next_idx in range(current_idx + 1, len(cells)):
-        target_cell = cells[next_idx]
-        target_text = target_cell.text.strip()
-        if not target_text or "{{" in target_text or "【" in target_text:
+        # 寻找不属于当前合并单元格的下一个新格子
+        if cells[next_idx]._tc != current_tc:
+            target_cell = cells[next_idx]
             if target_cell.paragraphs:
                 target_cell.paragraphs[0].text = str(value)
-                break
+            else:
+                target_cell.add_paragraph(str(value))
+            break
 
 def format_decision_options(cell, data):
     """还原认证决定结论格式"""
@@ -173,7 +169,7 @@ def format_decision_options(cell, data):
         p.text = mark + clean_text
 
 def process_table_safely(table, data):
-    """表格遍历：标签保持不动，将内容准确写入后面一个格子"""
+    """表格安全遍历，严格保证内容写入标签后一个格子"""
     visited_tcs = set()
 
     for row in table.rows:
@@ -186,7 +182,7 @@ def process_table_safely(table, data):
             cell_text = cell.text.strip()
             clean_text = re.sub(r"[\s:：]", "", cell_text)
 
-            # 先处理单元格内部自带占位符的情况
+            # 内部占位符替换
             for p in cell.paragraphs:
                 update_paragraph_checkboxes(p, data)
 
@@ -202,7 +198,7 @@ def process_table_safely(table, data):
             elif clean_text in ["任务号", "合同号"]:
                 fill_next_target_cell(cells, idx, data['task_no'])
 
-            # 4. 审核地址（有些模板在段落中，有些在表格单元格）
+            # 4. 段落中的地址、范围、日期匹配
             for p in cell.paragraphs:
                 p_clean = re.sub(r"\s+", "", p.text)
                 if "审核地址：" in p_clean or "审核地址:" in p_clean:
@@ -214,7 +210,7 @@ def process_table_safely(table, data):
                         prefix_text = p.text.split("日期：")[0]
                         p.text = f"{prefix_text}日期：{data['eval_date']}"
 
-            # 5. 表格中的单独日期格子处理
+            # 5. 表格内的单独日期格子
             if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间"]:
                 if "：" in cell_text or ":" in cell_text:
                     cell.paragraphs[0].text = f"日期：{data['eval_date']}"
