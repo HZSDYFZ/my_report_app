@@ -88,7 +88,7 @@ def is_real_data_row(row):
         return False
     return True
 
-def process_row_data(row, index, fallback_date=""):
+def process_row_data(row, index):
     """单行 Excel 数据解析"""
     company_name = str(get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default=""))
     task_no = str(get_clean_col_val(row, ["任务号", "合同号", "项目编号", "单号"], default=""))
@@ -99,9 +99,6 @@ def process_row_data(row, index, fallback_date=""):
     
     eval_date_raw = get_clean_col_val(row, ["评定通过时间", "评定日期", "决定日期", "日期", "评审日期", "评定时间", "通过时间", "通过日期", "完成日期"], default="")
     eval_date = clean_date_val(eval_date_raw)
-    
-    if not eval_date:
-        eval_date = fallback_date
 
     lead_first = extract_first_person(lead_raw)
 
@@ -137,7 +134,7 @@ def remove_invisible_chars(text):
     return re.sub(r'[\u200b\u200c\u200d\u00ad\ufeff]', '', text)
 
 def update_paragraph_checkboxes(p, data):
-    """文本框及普通段落占位符与复选框、日期替换（强制穿透隐藏字符）"""
+    """文本框及普通段落占位符与复选框、日期替换"""
     try:
         raw_text = p.text
     except Exception:
@@ -145,7 +142,6 @@ def update_paragraph_checkboxes(p, data):
     if not raw_text.strip():
         return
 
-    # 清洗隐藏字符用于匹配
     text = remove_invisible_chars(raw_text)
 
     replacements = {
@@ -168,9 +164,8 @@ def update_paragraph_checkboxes(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 【终极核心修复】兼容带隐藏字符的 P26-01-15 形式代号
+    # 替换带隐藏字符干扰的 P26-01-15 等代号
     if data["eval_date"]:
-        # 匹配 P 后面带有各种分隔符和数字的模式（如 P26-01-15）
         text = re.sub(r'P\s*\d{2,4}\s*[-–‑—]\s*\d{2}\s*[-–‑—]\s*\d{2}', data["eval_date"], text, flags=re.I)
         text = re.sub(r'(日期[：:])\s*([^\s]*)', r'\1' + data["eval_date"], text)
 
@@ -306,14 +301,11 @@ def fill_word_template(template_bytes, data):
 # Streamlit 界面
 st.title("📄 认证评定报告自动化生成系统")
 
-c1, c2, c3 = st.columns(3)
+c1, c2 = st.columns(2)
 with c1:
-    excel_file = st.file_uploader("1. 上传认证 Excel 数据文件", type=["xlsx", "xls"])
+    excel_file = st.file_uploader("1. 上传认证 Excel 数据文件 (.xlsx / .xls)", type=["xlsx", "xls"])
 with c2:
-    template_file = st.file_uploader("2. 上传 Word 报告模板", type=["docx"])
-with c3:
-    default_date_input = st.date_input("3. 默认评定日期（Excel无日期时使用）", value=datetime.today())
-    fallback_date_str = default_date_input.strftime("%Y-%m-%d")
+    template_file = st.file_uploader("2. 上传 Word 报告模板 (.docx)", type=["docx"])
 
 st.markdown("---")
 
@@ -322,7 +314,7 @@ if excel_file is not None and template_file is not None:
         raw_df = pd.read_excel(excel_file)
         template_bytes = template_file.getvalue()
 
-        parsed_records = [process_row_data(row, idx, fallback_date_str) for idx, row in raw_df.iterrows() if is_real_data_row(row)]
+        parsed_records = [process_row_data(row, idx) for idx, row in raw_df.iterrows() if is_real_data_row(row)]
 
         if not parsed_records:
             st.warning("⚠️ Excel 文件中未读取到有效数据。")
@@ -356,4 +348,4 @@ if excel_file is not None and template_file is not None:
     except Exception as e:
         st.error(f"处理失败: {str(e)}")
 else:
-    st.info("👈 请按顺序上传 Excel、Word 模板，并在右侧确认默认日期后开始处理。")
+    st.info("👈 请上传对应的 Excel 和 Word 模板文件进行处理。")
