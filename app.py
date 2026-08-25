@@ -22,7 +22,7 @@ def extract_first_person(lead_str):
     return parts[0] if parts and parts[0] else ""
 
 def clean_date_val(val):
-    """【增强】支持将 P26-04-01、Excel 数字序列号(如46113)或文本统一转换为 YYYY-MM-DD 格式"""
+    """将 Excel 评定日期序列号、P26-04-01 等格式统一转换为 YYYY-MM-DD 格式"""
     if pd.isna(val):
         return ""
     if isinstance(val, (pd.Timestamp, datetime)):
@@ -31,7 +31,7 @@ def clean_date_val(val):
     if not val_str or val_str.lower() in ["nan", "none", "null", "nat", "0", "undefined"]:
         return ""
     
-    # 1. 专门匹配类似 P26-04-01 或 26-04-01 的格式
+    # 1. 匹配类似 P26-04-01 或 26-04-01 的格式
     match = re.search(r'P?(\d{2})-(\d{2})-(\d{2})', val_str, re.IGNORECASE)
     if match:
         yy, mm, dd = match.groups()
@@ -151,8 +151,10 @@ def update_paragraph_checkboxes(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 【精准替换】只把“日期：”后面的旧编号/空格替换为新日期，绝不覆盖同行的其他文字
-    if "日期" in text and data["eval_date"]:
+    # 【核心修复】将模板中写死的 P26-01-15 等旧日期代号直接替换为 Excel 算出的日期
+    if data["eval_date"]:
+        text = re.sub(r'P?\d{2}-\d{2}-\d{2}', data["eval_date"], text)
+        # 精准替换“日期：”后面的内容
         text = re.sub(r"(日期[：:])\s*([^\s]*)", r"\1" + data["eval_date"], text)
 
     if "16949" in text:
