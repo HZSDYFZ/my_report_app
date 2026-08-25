@@ -12,7 +12,7 @@ st.set_page_config(page_title="认证评定报告自动化生成系统", page_ic
 BOX_PATTERN = re.compile(r"^[□☐☑✔\[\]口\s]+")
 
 def extract_first_person(lead_str):
-    """提取审核组长第一个姓名"""
+    """提取审核组长姓名（保留原始正确逻辑）"""
     if pd.isna(lead_str) or not str(lead_str).strip():
         return ""
     s = str(lead_str).strip()
@@ -22,7 +22,7 @@ def extract_first_person(lead_str):
     return parts[0] if parts and parts[0] else ""
 
 def get_clean_col_val(row, possible_keys, default=""):
-    """多表头列名模糊匹配"""
+    """表头多别名模糊匹配（保留原有机制，补充边界兼容）"""
     for key in possible_keys:
         for col in row.index:
             col_clean = str(col).replace(" ", "").replace("\n", "").lower()
@@ -39,7 +39,7 @@ def get_clean_col_val(row, possible_keys, default=""):
     return default
 
 def is_real_data_row(row):
-    """过滤 Excel 尾部空白/汇总行"""
+    """过滤 Excel 尾部无效空行"""
     if row.dropna().empty:
         return False
     comp = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default="")
@@ -54,7 +54,7 @@ def is_real_data_row(row):
     return True
 
 def process_row_data(row, index):
-    """提取单行 Excel 数据并计算结论勾选逻辑"""
+    """单行 Excel 数据解析"""
     company_name = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default="")
     task_no = get_clean_col_val(row, ["任务号", "合同号", "项目编号", "单号"], default=f"TASK_{index+1}")
     lead_raw = get_clean_col_val(row, ["审核组长", "组长", "审核员", "组长姓名", "lead", "姓名"], default="")
@@ -65,15 +65,10 @@ def process_row_data(row, index):
 
     lead_first = extract_first_person(lead_raw)
 
-    # 标志判断
     task_upper = task_no.upper()
     has_ts = "TS" in task_upper or "16949" in audit_type_raw
     has_er = "ER" in task_upper or "9001" in audit_type_raw
 
-    # 结论勾选目标选项位置 (1-based index)
-    # 红色（初审/再认证） -> 第 1 项
-    # 黄色（转移）        -> 第 3 项
-    # 青色（监一/监二/监审）-> 第 5 项
     decision_option = 1
     if "转移" in audit_type_raw:
         decision_option = 3
@@ -96,12 +91,11 @@ def process_row_data(row, index):
     }
 
 def update_paragraph_checkboxes(p, data):
-    """替换段落内现有的标准/类型复选框"""
+    """文本框及普通段落替换"""
     text = p.text
     if not text.strip():
         return
 
-    # 替换占位符
     replacements = {
         "{{公司名称}}": data["company_name"],
         "{{任务号}}": data["task_no"],
@@ -114,7 +108,6 @@ def update_paragraph_checkboxes(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 认证标准与审核类型复选框
     if "16949" in text:
         sym = "☑" if data["has_ts"] else "☐"
         text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", text, flags=re.I)
@@ -135,7 +128,6 @@ def update_paragraph_checkboxes(p, data):
         p.text = text
 
 def fill_cell_if_empty(cell, value):
-    """安全填充单元格内容"""
     if not str(value).strip():
         return
     cell_text = cell.text.strip()
@@ -144,7 +136,7 @@ def fill_cell_if_empty(cell, value):
             cell.paragraphs[0].text = str(value)
 
 def format_decision_options(cell, data):
-    """处理认证决定结论区域：为所有选项增加前置格子并勾选指定项"""
+    """按照原始正确格式规范还原“认证决定结论”选项勾选"""
     option_paragraphs = [p for p in cell.paragraphs if "通过" in p.text or "不予通过" in p.text]
     target_idx = data["decision_option"]
 
@@ -155,7 +147,6 @@ def format_decision_options(cell, data):
         is_selected = (opt_i == target_idx)
         mark = "☑ " if is_selected else "☐ "
 
-        # 如果选中的是第 1 项且带有范围括号，补全认证范围
         if opt_i == 1 and "适用于：" in clean_text:
             prefix = clean_text.split("适用于：")[0]
             clean_text = f"{prefix}适用于：{data['scope']}）"
@@ -163,7 +154,7 @@ def format_decision_options(cell, data):
         p.text = mark + clean_text
 
 def process_table_safely(table, data):
-    """非破坏性表格遍历与绑定"""
+    """安全遍历表格单元格进行填充，不破坏已有格式"""
     visited_tcs = set()
 
     for row in table.rows:
@@ -176,11 +167,9 @@ def process_table_safely(table, data):
             cell_text = cell.text.strip()
             clean_text = cell_text.replace(" ", "").replace("\n", "")
 
-            # 1. 替换段落占位符与基础勾选框
             for p in cell.paragraphs:
                 update_paragraph_checkboxes(p, data)
 
-            # 2. 精准匹配标签并填入数据
             if clean_text in ["公司名称", "客户名称", "公司名称：", "客户名称："]:
                 if "：" in cell_text or ":" in cell_text:
                     cell.paragraphs[0].text = f"公司名称：{data['company_name']}"
@@ -199,7 +188,6 @@ def process_table_safely(table, data):
                 elif idx + 1 < len(cells):
                     fill_cell_if_empty(cells[idx + 1], data['lead'])
 
-            # 处理内嵌多段落的地址和范围
             for p in cell.paragraphs:
                 p_clean = p.text.replace(" ", "")
                 if "审核地址：" in p_clean or "审核地址:" in p_clean:
@@ -207,7 +195,6 @@ def process_table_safely(table, data):
                 elif "认证范围：" in p_clean or "认证范围:" in p_clean:
                     p.text = f"认证范围：{data['scope']}"
 
-            # 3. 处理认证决定结论格式与前置勾选框
             if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
                 format_decision_options(cell, data)
 
@@ -225,10 +212,8 @@ def fill_word_template(template_bytes, data):
     out_stream.seek(0)
     return out_stream.getvalue()
 
-# ==========================================
-# Streamlit 前端界面
-# ==========================================
-st.title("🛡️ 认证评定报告自动化生成系统")
+# Streamlit 界面
+st.title("📄 认证评定报告自动化生成系统")
 
 c1, c2 = st.columns(2)
 with c1:
@@ -243,29 +228,17 @@ if excel_file is not None and template_file is not None:
         raw_df = pd.read_excel(excel_file)
         template_bytes = template_file.getvalue()
 
-        parsed_records = []
-        for idx, row in raw_df.iterrows():
-            if is_real_data_row(row):
-                parsed_records.append(process_row_data(row, idx))
+        parsed_records = [process_row_data(row, idx) for idx, row in raw_df.iterrows() if is_real_data_row(row)]
 
         if not parsed_records:
             st.warning("⚠️ Excel 文件中未读取到有效数据。")
         else:
-            st.subheader(f"📋 提取数据预览（共 {len(parsed_records)} 条记录）")
+            st.subheader(f"📋 预览数据（共 {len(parsed_records)} 条）")
             preview_df = pd.DataFrame(parsed_records)[
                 ["company_name", "task_no", "lead", "audit_type_raw", "decision_option", "address", "scope"]
             ]
             preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "勾选结论选项", "审核地址", "认证范围"]
-            
-            preview_df["勾选结论选项"] = preview_df["勾选结论选项"].map({
-                1: "第 1 项 (初审/再认证)",
-                3: "第 3 项 (转移)",
-                5: "第 5 项 (监一/监二)"
-            }).fillna("第 1 项")
-
             st.dataframe(preview_df, use_container_width=True)
-
-            st.markdown("### 🚀 开始生成")
 
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -278,7 +251,7 @@ if excel_file is not None and template_file is not None:
             zip_buffer.seek(0)
 
             st.download_button(
-                label=f"📦 一键下载 Word 报告包 ({len(parsed_records)} 份 .zip)",
+                label=f"📦 下载批量生成报告包 ({len(parsed_records)} 份 .zip)",
                 data=zip_buffer.getvalue(),
                 file_name="认证评定报告包.zip",
                 mime="application/zip",
@@ -287,7 +260,6 @@ if excel_file is not None and template_file is not None:
             )
 
     except Exception as e:
-        st.error(f"发生错误: {str(e)}")
-        st.exception(e)
+        st.error(f"处理失败: {str(e)}")
 else:
-    st.info("👈 请在上方上传 **Excel 数据文件** 和 **Word 模板文件**。")
+    st.info("👈 请上传对应的 Excel 和 Word 模板文件进行处理。")
