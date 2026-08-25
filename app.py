@@ -113,7 +113,6 @@ def process_paragraph_text(p, data):
         "【评定通过时间】": chinese_date,
     }
 
-    # 核心优化：只修改包含目标文字的 Run 片段，保留整个段落的底层结构、Tab 和后续的编号
     for run in p.runs:
         run_text = remove_invisible_chars(run.text)
         if not run_text:
@@ -127,17 +126,16 @@ def process_paragraph_text(p, data):
                 run_text = run_text.replace(k, str(v))
                 modified = True
 
-        # 2. 精准将日期写在“日期：”后面（并在冒号后自动加一个空格）
+        # 2. 精准将日期写在“日期：”后面（冒号后自动加一个空格）
         if chinese_date:
             for prefix in ["评定日期", "评审日期", "决定日期", "日期", "评定通过时间"]:
                 if prefix in run_text:
                     pattern = r'(' + prefix + r'\s*[：:])\s*([_—\s]*|\d{4}[年\-\./]\d{1,2}[月\-\./]\d{1,2}日?)'
                     if re.search(pattern, run_text):
-                        # \1 代表标签和冒号，后面加一个空格再接日期
                         run_text = re.sub(pattern, r'\1 ' + chinese_date, run_text)
                         modified = True
 
-        # 3. 复选框状态更新
+        # 3. 标准与审核类型复选框状态更新[cite: 4]
         if "16949" in run_text:
             sym = "☑" if data["has_ts"] else "☐"
             run_text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", run_text, flags=re.I)
@@ -147,16 +145,20 @@ def process_paragraph_text(p, data):
             run_text = re.sub(r"[□☐☑✔]\s*(ISO\s*9001)", f"{sym} \\1", run_text, flags=re.I)
             modified = True
         if "初审" in run_text:
-            sym = "☑" if ("初" in data["audit_type_raw"] and "监" not in data["audit_type_raw"]) else "☐"
+            sym = "☑" if data["is_initial"] else "☐"
             run_text = re.sub(r"[□☐☑✔]\s*(初审)", f"{sym} \\1", run_text)
             modified = True
         if "监审" in run_text:
-            sym = "☑" if "监" in data["audit_type_raw"] else "☐"
+            sym = "☑" if data["is_surveillance"] else "☐"
             run_text = re.sub(r"[□☐☑✔]\s*(监审)", f"{sym} \\1", run_text)
             modified = True
         if "再认证" in run_text or "转移" in run_text:
-            sym = "☑" if ("再认证" in data["audit_type_raw"] or "转移" in data["audit_type_raw"]) else "☐"
-            run_text = re.sub(r"[□☐☑✔]\s*(再认证/转移)", f"{sym} \\1", run_text)
+            sym = "☑" if data["is_recert_transfer"] else "☐"
+            run_text = re.sub(r"[□☐☑✔]\s*(再认证/转移|再认证|转移)", f"{sym} \\1", run_text)
+            modified = True
+        if "特殊" in run_text:
+            sym = "☑" if data["is_special"] else "☐"
+            run_text = re.sub(r"[□☐☑✔]\s*(特殊审核|特殊)", f"{sym} \\1", run_text)
             modified = True
 
         if modified:
@@ -177,8 +179,8 @@ def fill_next_target_cell(cells, current_idx, value):
             break
 
 def format_decision_options(cell, data):
-    """还原认证决定结论格式"""
-    option_paragraphs = [p for p in cell.paragraphs if "通过" in p.text or "不予通过" in p.text]
+    """还原认证决定结论格式，支持多选项精准匹配勾选"""
+    option_paragraphs = [p for p in cell.paragraphs if "通过" in p.text or "不予通过" in p.text or BOX_PATTERN.search(p.text)]
     target_idx = data["decision_option"]
 
     for opt_i, p in enumerate(option_paragraphs, start=1):
@@ -289,32 +291,21 @@ if excel_file is not None and template_file is not None:
         template_bytes = template_file.getvalue()
         columns = list(raw_df.columns)
 
-        st.subheader("⚙️ Excel 列字段精准映射")
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        with col_m1:
-            col_comp = st.selectbox("公司名称列", columns, index=columns.index(find_best_column(columns, ["公司名称", "客户名称", "企业名称", "公司"])))
-        with col_m2:
-            col_task = st.selectbox("任务号列", columns, index=columns.index(find_best_column(columns, ["任务号", "合同号", "项目编号"])))
-        with col_m3:
-            col_lead = st.selectbox("审核组长列", columns, index=columns.index(find_best_column(columns, ["审核组长", "组长", "审核员"])))
-        with col_m4:
-            col_date = st.selectbox("📅 评定日期列", columns, index=columns.index(find_best_column(columns, ["评定通过时间", "评定日期", "决定日期", "日期", "评审日期", "时间"])))
-
-        col_m5, col_m6, col_m7 = st.columns(3)
-        with col_m5:
-            col_addr = st.selectbox("审核地址列", columns, index=columns.index(find_best_column(columns, ["审核地址", "地址"])))
-        with col_m6:
-            col_scope = st.selectbox("认证范围列", columns, index=columns.index(find_best_column(columns, ["审核范围", "认证范围", "范围"])))
-        with col_m7:
-            col_type = st.selectbox("审核类型列", columns, index=columns.index(find_best_column(columns, ["审核类型", "类型", "阶段"])))
-
-        st.markdown("---")
+        # 后台自动智能匹配列名
+        col_comp = find_best_column(columns, ["公司名称", "客户名称", "企业名称", "公司"])
+        col_task = find_best_column(columns, ["任务号", "合同号", "项目编号"])
+        col_lead = find_best_column(columns, ["审核组长", "组长", "审核员"])
+        col_date = find_best_column(columns, ["评定通过时间", "评定日期", "决定日期", "日期", "评审日期", "时间"])
+        col_addr = find_best_column(columns, ["审核地址", "地址"])
+        col_scope = find_best_column(columns, ["审核范围", "认证范围", "范围"])
+        col_type = find_best_column(columns, ["审核类型", "类型", "阶段"])
+        col_conclusion = find_best_column(columns, ["认证决定结论", "决定结论", "结论"])
 
         parsed_records = []
         for idx, row in raw_df.iterrows():
-            comp_val = str(row.get(col_comp, ""))
-            task_val = str(row.get(col_task, ""))
-            lead_val = str(row.get(col_lead, ""))
+            comp_val = str(row.get(col_comp, "")) if col_comp else ""
+            task_val = str(row.get(col_task, "")) if col_task else ""
+            lead_val = str(row.get(col_lead, "")) if col_lead else ""
             
             if pd.isna(row.dropna()).all() or (comp_val.lower() in ["nan", "none", "", "0"] and task_val.lower() in ["nan", "none", "", "0"]):
                 continue
@@ -322,24 +313,41 @@ if excel_file is not None and template_file is not None:
             company_name = comp_val if comp_val.lower() not in ["nan", "none"] else ""
             task_no = task_val if task_val.lower() not in ["nan", "none"] else ""
             lead_first = extract_first_person(lead_val)
-            address = str(row.get(col_addr, "")) if not pd.isna(row.get(col_addr)) else ""
-            scope = str(row.get(col_scope, "")) if not pd.isna(row.get(col_scope)) else ""
-            audit_type_raw = str(row.get(col_type, "")) if not pd.isna(row.get(col_type)) else ""
+            address = str(row.get(col_addr, "")) if col_addr and not pd.isna(row.get(col_addr)) else ""
+            scope = str(row.get(col_scope, "")) if col_scope and not pd.isna(row.get(col_scope)) else ""
+            audit_type_raw = str(row.get(col_type, "")) if col_type and not pd.isna(row.get(col_type)) else ""
+            decision_conclusion = str(row.get(col_conclusion, "")) if col_conclusion and not pd.isna(row.get(col_conclusion)) else ""
             
-            eval_date_raw = row.get(col_date, "")
+            eval_date_raw = row.get(col_date, "") if col_date else ""
             eval_date = clean_date_val(eval_date_raw)
 
             task_upper = task_no.upper()
-            has_ts = "TS" in task_upper or "16949" in audit_type_raw
-            has_er = "ER" in task_upper or "9001" in audit_type_raw
+            
+            # 标准勾选判定：TS/ER 逻辑[cite: 4]
+            has_ts = "TS" in task_upper and "ER" not in task_upper
+            has_er = "ER" in task_upper and "TS" not in task_upper
+            if "TS" in task_upper and "ER" in task_upper:
+                has_ts = True
+                has_er = True
 
-            decision_option = 1
-            if "转移" in audit_type_raw:
-                decision_option = 3
-            elif "监" in audit_type_raw:
-                decision_option = 5
-            elif "初" in audit_type_raw or "再认证" in audit_type_raw:
+            # 审核类型勾选判定[cite: 4]
+            is_initial = "二阶段" in audit_type_raw
+            is_surveillance = "监一" in audit_type_raw or "监二" in audit_type_raw
+            is_recert_transfer = "再认证" in audit_type_raw or "转移" in audit_type_raw
+            is_special = "特殊" in audit_type_raw
+
+            # 认证决定结论选项判定逻辑[cite: 4]
+            decision_option = 1  # 默认第一行
+            if "二阶段" in audit_type_raw or "再认证" in audit_type_raw:
                 decision_option = 1
+            elif "转移" in audit_type_raw:
+                decision_option = 3
+            elif ("监一" in audit_type_raw or "监二" in audit_type_raw) and "不换证" in decision_conclusion:
+                decision_option = 5
+            elif ("监一" in audit_type_raw or "监二" in audit_type_raw) and "换发" in decision_conclusion:
+                decision_option = 6
+            elif "特殊" in audit_type_raw and "换发" in decision_conclusion:
+                decision_option = 4
 
             parsed_records.append({
                 "company_name": company_name,
@@ -349,7 +357,12 @@ if excel_file is not None and template_file is not None:
                 "scope": scope,
                 "has_ts": has_ts,
                 "has_er": has_er,
+                "is_initial": is_initial,
+                "is_surveillance": is_surveillance,
+                "is_recert_transfer": is_recert_transfer,
+                "is_special": is_special,
                 "audit_type_raw": audit_type_raw,
+                "decision_conclusion": decision_conclusion,
                 "decision_option": decision_option,
                 "eval_date": eval_date
             })
@@ -359,9 +372,9 @@ if excel_file is not None and template_file is not None:
         else:
             st.subheader(f"📋 预览数据（共 {len(parsed_records)} 条）")
             preview_df = pd.DataFrame(parsed_records)[
-                ["company_name", "task_no", "lead", "audit_type_raw", "decision_option", "eval_date"]
+                ["company_name", "task_no", "lead", "audit_type_raw", "decision_conclusion", "decision_option", "eval_date"]
             ]
-            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "勾选结论选项", "评定日期"]
+            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "决定结论", "勾选结论选项", "评定日期"]
             st.dataframe(preview_df, use_container_width=True)
 
             zip_buffer = io.BytesIO()
