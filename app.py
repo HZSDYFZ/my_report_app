@@ -5,13 +5,14 @@ import zipfile
 import pandas as pd
 import streamlit as st
 from docx import Document
+from datetime import datetime
 
 st.set_page_config(page_title="认证评定报告自动化生成系统", page_icon="📄", layout="wide")
 
-BOX_CHARS = r"[□☐☑✔\[\]口]"
+BOX_PATTERN = re.compile(r"[□☐\[\]口]")
 
 def extract_first_person(lead_str):
-    """提取组长姓名"""
+    """提取审核组长姓名"""
     if pd.isna(lead_str) or not str(lead_str).strip():
         return ""
     s = str(lead_str).strip()
@@ -20,8 +21,8 @@ def extract_first_person(lead_str):
     parts = re.split(r"[ ,，/、+&\t\n]+", s)
     return parts[0] if parts and parts[0] else ""
 
-def get_clean_col_val(row, possible_keys, default="未填写"):
-    """多列名模糊匹配"""
+def get_clean_col_val(row, possible_keys, default=""):
+    """多列名模糊匹配与格式化"""
     for key in possible_keys:
         for col in row.index:
             col_clean = str(col).replace(" ", "").replace("\n", "").lower()
@@ -30,7 +31,6 @@ def get_clean_col_val(row, possible_keys, default="未填写"):
                 val = row[col]
                 if pd.isna(val):
                     continue
-                # 日期格式化处理
                 if isinstance(val, (pd.Timestamp, datetime)) or "date" in type(val).__name__.lower():
                     return str(val).split(" ")[0]
                 val_str = str(val).strip()
@@ -38,10 +38,8 @@ def get_clean_col_val(row, possible_keys, default="未填写"):
                     return val_str
     return default
 
-from datetime import datetime
-
 def is_real_data_row(row):
-    """过滤 Excel 尾部空白行"""
+    """过滤 Excel 尾部空白/汇总行"""
     if row.dropna().empty:
         return False
     comp = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "公司"], default="")
@@ -56,27 +54,21 @@ def is_real_data_row(row):
     return True
 
 def process_row_data(row, index):
-    """提取单行 Excel 数据并计算勾选逻辑"""
-    company_name = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "公司"], default="未填写公司")
+    """提取 Excel 数据并计算结论勾选逻辑"""
+    company_name = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "公司"], default="")
     task_no = get_clean_col_val(row, ["任务号", "合同号", "项目编号"], default=f"TASK_{index+1}")
-    lead_raw = get_clean_col_val(row, ["审核组长", "组长", "审核员", "组长姓名"], default="")
-    address = get_clean_col_val(row, ["审核地址", "地址", "企业地址"], default="未填写地址")
-    scope = get_clean_col_val(row, ["审核范围", "认证范围", "范围"], default="未填写范围")
+    lead_raw = get_clean_col_val(row, ["审核组长", "组长", "审核员"], default="")
+    address = get_clean_col_val(row, ["审核地址", "地址", "企业地址"], default="")
+    scope = get_clean_col_val(row, ["审核范围", "认证范围", "范围"], default="")
     audit_type_raw = get_clean_col_val(row, ["审核类型", "audit type"], default="")
-    eval_date = get_clean_col_val(row, ["评定日期", "决定日期", "日期", "eval date"], default="")
+    eval_date = get_clean_col_val(row, ["评定日期", "决定日期", "日期"], default="")
 
-    # 提取第一组长
-    lead_first = extract_first_person(lead_raw) or "未填写组长"
+    lead_first = extract_first_person(lead_raw)
 
-    # 标准匹配
-    task_no_upper = task_no.upper()
-    has_ts = "TS" in task_no_upper
-    has_er = "ER" in task_no_upper
-
-    # 结论勾选位置逻辑判定
-    # 红色（初审/再认证） -> 第1个勾
-    # 黄色（转移）        -> 第3个勾
-    # 青色（监一/监二/监审）-> 第5个勾
+    # 结论勾选判定:
+    # 红色 (初审/再认证)   -> 第 1 个勾
+    # 黄色 (转移)          -> 第 3 个勾
+    # 青色 (监一/监二/监审)-> 第 5 个勾
     decision_option = 0
     if "转移" in audit_type_raw:
         decision_option = 3
@@ -91,58 +83,79 @@ def process_row_data(row, index):
         "lead": lead_first,
         "address": address,
         "scope": scope,
-        "has_ts": has_ts,
-        "has_er": has_er,
         "audit_type_raw": audit_type_raw,
-        "decision_option": decision_option,  # 1, 3, 5
+        "decision_option": decision_option,
         "eval_date": eval_date
     }
 
-def set_nth_checkbox(text, target_index):
-    """把文本中的第 target_index 个复选框设为 ☑，其余保持/设为 ☐"""
-    count = 0
-    def repl(m):
-        nonlocal count
-        count += 1
-        return "☑" if count == target_index else "☐"
-    return re.sub(BOX_CHARS, repl, text)
+def replace_placeholders_in_paragraph(p, data):
+    """段落文本内精准替换占位符，不损毁样式"""
+    if not p.text:
+        return
+    replacements = {
+        "{{公司名称}}": data["company_name"],
+        "{{客户名称}}": data["company_name"],
+        "{{任务号}}": data["task_no"],
+        "{{审核组长}}": data["lead"],
+        "{{组长}}": data["lead"],
+        "{{审核地址}}": data["address"],
+        "{{地址}}": data["address"],
+        "{{审核范围}}": data["scope"],
+        "{{范围}}": data["scope"],
+        "{{评定日期}}": data["eval_date"],
+        "{{日期}}": data["eval_date"],
+        "{{审核类型}}": data["audit_type_raw"],
+    }
+    text = p.text
+    for k, v in replacements.items():
+        if k in text:
+            text = text.replace(k, str(v))
+    if text != p.text:
+        p.text = text
 
-def fill_table_safely(table, data):
-    """非破坏性填充表格及决定结论处理"""
+def process_table_safely(table, data):
+    """去重保护合并单元格，仅修改 paragraph.text，不破坏表格框架"""
+    visited_tcs = set()
+
     for row in table.rows:
         cells = row.cells
-        row_full_text = "".join(c.text.strip() for c in cells)
-
-        # 1. 认证决定结论区域处理（勾选第 1/3/5 项）
-        if "结论" in row_full_text or "决定" in row_full_text or "同意" in row_full_text:
-            for cell in cells:
-                # 勾选指定索引的选项
-                if re.search(BOX_CHARS, cell.text) and data["decision_option"] > 0:
-                    cell.text = set_nth_checkbox(cell.text, data["decision_option"])
-                
-                # 日期替换
-                if "日期" in cell.text and data["eval_date"]:
-                    if "{{" in cell.text:
-                        cell.text = re.sub(r"\{\{.*?\}\}", data["eval_date"], cell.text)
-                    elif "：" in cell.text or ":" in cell.text:
-                        prefix = cell.text.split("：")[0] if "：" in cell.text else cell.text.split(":")[0]
-                        cell.text = f"{prefix}：{data['eval_date']}"
-
-        # 2. 常规数据行强填（不改左列，只填右列或替换占位符）
         for idx, cell in enumerate(cells):
-            # 处理 {{占位符}}
-            if "{{" in cell.text:
-                cell.text = cell.text.replace("{{公司名称}}", data["company_name"])\
-                                     .replace("{{任务号}}", data["task_no"])\
-                                     .replace("{{审核组长}}", data["lead"])\
-                                     .replace("{{审核地址}}", data["address"])\
-                                     .replace("{{审核范围}}", data["scope"])\
-                                     .replace("{{评定日期}}", data["eval_date"])
+            # 防止重复修改合并单元格 (colspan / rowspan)
+            if cell._tc in visited_tcs:
+                continue
+            visited_tcs.add(cell._tc)
 
-            raw_text = cell.text.strip()
-            clean_text = raw_text.replace(" ", "").replace("\n", "")
+            cell_text = cell.text.strip()
+            clean_cell_text = cell_text.replace(" ", "").replace("\n", "")
 
-            # 根据标题补入右格
+            # 1. 替换单元格内已有的占位符
+            for p in cell.paragraphs:
+                replace_placeholders_in_paragraph(p, data)
+
+            # 2. 认证决定结论区域：精准处理第 N 个复选框与评定日期
+            if "认证决定" in clean_cell_text or "决定结论" in clean_cell_text:
+                opt_target = data["decision_option"]
+                if opt_target > 0:
+                    box_count = 0
+                    for p in cell.paragraphs:
+                        if BOX_PATTERN.search(p.text):
+                            def replace_box(m):
+                                nonlocal box_count
+                                box_count += 1
+                                return "☑" if box_count == opt_target else "☐"
+                            p.text = BOX_PATTERN.sub(replace_box, p.text)
+                
+                # 回填评定日期
+                if data["eval_date"]:
+                    for p in cell.paragraphs:
+                        if "日期" in p.text and ("：" in p.text or ":" in p.text or "{{" in p.text):
+                            if "{{" in p.text:
+                                p.text = re.sub(r"\{\{.*?\}\}", data["eval_date"], p.text)
+                            else:
+                                prefix = re.split(r"[:：]", p.text)[0]
+                                p.text = f"{prefix}：{data['eval_date']}"
+
+            # 3. 模板纯文本绑定（如“公司名称”匹配右侧格子）
             mappings = [
                 (["公司名称", "客户名称"], data["company_name"]),
                 (["任务号", "合同号"], data["task_no"]),
@@ -150,29 +163,32 @@ def fill_table_safely(table, data):
                 (["审核地址", "企业地址"], data["address"]),
                 (["审核范围", "认证范围"], data["scope"]),
             ]
+
             for keywords, val in mappings:
-                if any(kw in clean_text for kw in keywords):
-                    if idx + 1 < len(cells):
-                        next_cell_text = cells[idx + 1].text.strip()
-                        if not next_cell_text or "{{" in next_cell_text:
-                            cells[idx + 1].text = str(val)
+                if any(kw in clean_cell_text for kw in keywords) and val:
+                    # 情况 A: 单元格形如 "公司名称：" 且后方为空
+                    if ("：" in cell_text or ":" in cell_text) and not cell_text.split("：")[-1].strip().split(":")[-1].strip():
+                        prefix = re.split(r"[:：]", cell_text)[0]
+                        if cell.paragraphs:
+                            cell.paragraphs[0].text = f"{prefix}：{val}"
+                    # 情况 B: 当前格为标题，值写在右侧相邻单元格
+                    elif idx + 1 < len(cells):
+                        next_cell = cells[idx + 1]
+                        next_text = next_cell.text.strip()
+                        if not next_text or "{{" in next_text:
+                            if next_cell.paragraphs:
+                                next_cell.paragraphs[0].text = str(val)
 
 def fill_word_template(template_bytes, data):
     doc = Document(io.BytesIO(template_bytes))
 
-    # 替换正文占位符
+    # 1. 替换正文段落
     for p in doc.paragraphs:
-        if "{{" in p.text:
-            p.text = p.text.replace("{{公司名称}}", data["company_name"])\
-                           .replace("{{任务号}}", data["task_no"])\
-                           .replace("{{审核组长}}", data["lead"])\
-                           .replace("{{审核地址}}", data["address"])\
-                           .replace("{{审核范围}}", data["scope"])\
-                           .replace("{{评定日期}}", data["eval_date"])
+        replace_placeholders_in_paragraph(p, data)
 
-    # 填充表格
+    # 2. 遍历表格填充
     for table in doc.tables:
-        fill_table_safely(table, data)
+        process_table_safely(table, data)
 
     out_stream = io.BytesIO()
     doc.save(out_stream)
@@ -207,16 +223,15 @@ if excel_file is not None and template_file is not None:
         else:
             st.subheader(f"📋 提取数据预览（共 {len(parsed_records)} 条记录）")
             preview_df = pd.DataFrame(parsed_records)[
-                ["company_name", "task_no", "lead", "audit_type_raw", "decision_option", "eval_date", "address"]
+                ["company_name", "task_no", "lead", "audit_type_raw", "decision_option", "eval_date"]
             ]
-            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "勾选结论项", "评定日期", "审核地址"]
+            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "勾选结论位置", "评定日期"]
             
-            # 显示解析后的结论选项说明
-            preview_df["勾选结论项"] = preview_df["勾选结论项"].map({
+            preview_df["勾选结论位置"] = preview_df["勾选结论位置"].map({
                 1: "第 1 项 (初审/再认证)",
                 3: "第 3 项 (转移)",
                 5: "第 5 项 (监一/监二)"
-            }).fillna("未匹配")
+            }).fillna("未定义")
 
             st.dataframe(preview_df, use_container_width=True)
 
@@ -226,8 +241,8 @@ if excel_file is not None and template_file is not None:
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                 for idx, data in enumerate(parsed_records):
                     doc_bytes = fill_word_template(template_bytes, data)
-                    clean_company = re.sub(r'[\\/*?:"<>|]', "_", str(data["company_name"]))
-                    clean_task = re.sub(r'[\\/*?:"<>|]', "_", str(data["task_no"]))
+                    clean_company = re.sub(r'[\\/*?:"<>|]', "_", str(data["company_name"]) or "未命名企业")
+                    clean_task = re.sub(r'[\\/*?:"<>|]', "_", str(data["task_no"]) or "未命名任务")
                     zf.writestr(f"{clean_company}_{clean_task}_评定报告.docx", doc_bytes)
 
             zip_buffer.seek(0)
