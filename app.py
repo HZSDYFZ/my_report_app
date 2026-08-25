@@ -22,7 +22,7 @@ def extract_first_person(lead_str):
     return parts[0] if parts and parts[0] else ""
 
 def clean_date_val(val):
-    """【新增】将 Excel 评定日期序列号或文本转换为标准的 YYYY-MM-DD 格式"""
+    """【增强】支持将 P26-04-01、Excel 数字序列号(如46113)或文本统一转换为 YYYY-MM-DD 格式"""
     if pd.isna(val):
         return ""
     if isinstance(val, (pd.Timestamp, datetime)):
@@ -30,7 +30,14 @@ def clean_date_val(val):
     val_str = str(val).strip()
     if not val_str or val_str.lower() in ["nan", "none", "null", "nat", "0", "undefined"]:
         return ""
-    # 处理 Excel 数字日期序列号（如 46113）
+    
+    # 1. 专门匹配类似 P26-04-01 或 26-04-01 的格式
+    match = re.search(r'P?(\d{2})-(\d{2})-(\d{2})', val_str, re.IGNORECASE)
+    if match:
+        yy, mm, dd = match.groups()
+        return f"20{yy}-{mm}-{dd}"
+
+    # 2. 处理 Excel 数字日期序列号（如 46113）
     try:
         f_val = float(val_str)
         if 30000 < f_val < 60000:
@@ -39,7 +46,7 @@ def clean_date_val(val):
     except ValueError:
         pass
     
-    # 尝试直接用 pandas 解析日期文本
+    # 3. 尝试直接用 pandas 解析常规日期文本
     try:
         dt = pd.to_datetime(val_str)
         if not pd.isna(dt):
@@ -144,9 +151,9 @@ def update_paragraph_checkboxes(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 【新增】精准替换段落中的日期：后面内容
+    # 【精准替换】只把“日期：”后面的旧编号/空格替换为新日期，绝不覆盖同行的其他文字
     if "日期" in text and data["eval_date"]:
-        text = re.sub(r"(日期[：:])\s*.*", r"\1" + data["eval_date"], text)
+        text = re.sub(r"(日期[：:])\s*([^\s]*)", r"\1" + data["eval_date"], text)
 
     if "16949" in text:
         sym = "☑" if data["has_ts"] else "☐"
@@ -231,7 +238,7 @@ def process_table_safely(table, data):
             elif (clean_text in ["审核组长", "组长"]) and "报告评定人员" not in clean_text:
                 fill_next_target_cell(cells, idx, data['lead'])
 
-            # 4. 段落中的地址、范围、日期匹配
+            # 4. 段落中的地址、范围匹配
             for p in cell.paragraphs:
                 p_clean = re.sub(r"\s+", "", p.text)
                 if "审核地址：" in p_clean or "审核地址:" in p_clean:
@@ -239,11 +246,12 @@ def process_table_safely(table, data):
                 elif "认证范围：" in p_clean or "认证范围:" in p_clean:
                     p.text = f"认证范围：{data['scope']}"
 
-            # 5. 表格内的单独日期格子
+            # 5. 表格内的单独日期单元格处理
             if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间"]:
-                if "：" in cell_text or ":" in cell_text:
-                    # 如果单元格自带“日期：”，在后面填上正确日期
-                    cell.paragraphs[0].text = re.sub(r"(日期[：:])\s*.*", r"\1" + data['eval_date'], cell.paragraphs[0].text)
+                if cell.paragraphs:
+                    cell.paragraphs[0].text = re.sub(r"(日期[：:])\s*([^\s]*)", r"\1" + data['eval_date'], cell.paragraphs[0].text)
+                    if "：" not in cell.paragraphs[0].text and ":" not in cell.paragraphs[0].text:
+                        cell.paragraphs[0].text = f"日期：{data['eval_date']}"
 
             # 6. 认证决定结论选项勾选
             if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
