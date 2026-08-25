@@ -58,74 +58,15 @@ def clean_date_val(val):
         
     return val_str.split(" ")[0]
 
-def get_clean_col_val(row, possible_keys, default=""):
-    """表头多别名模糊匹配"""
+def find_best_column(columns, possible_keys):
+    """智能匹配或返回空"""
     for key in possible_keys:
-        for col in row.index:
+        for col in columns:
             col_clean = str(col).replace(" ", "").replace("\n", "").lower()
             key_clean = key.replace(" ", "").lower()
             if key_clean in col_clean:
-                val = row[col]
-                if pd.isna(val):
-                    continue
-                val_str = str(val).strip()
-                if val_str and val_str.lower() not in ["nan", "none", "null", "nat", "0", "undefined"]:
-                    return val
-    return default
-
-def is_real_data_row(row):
-    """过滤 Excel 尾部无效空行"""
-    if row.dropna().empty:
-        return False
-    comp = str(get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default=""))
-    task = str(get_clean_col_val(row, ["任务号", "合同号", "项目编号"], default=""))
-    lead = str(get_clean_col_val(row, ["审核组长", "组长", "审核员", "组长姓名"], default=""))
-
-    invalid_words = ["", "nan", "none", "null", "未知企业", "未填写", "0"]
-    if comp.lower() in invalid_words and task.lower() in invalid_words and lead.lower() in invalid_words:
-        return False
-    if any(kw in comp for kw in ["合计", "小计", "统计", "说明", "备注", "填表说明"]):
-        return False
-    return True
-
-def process_row_data(row, index):
-    """单行 Excel 数据解析"""
-    company_name = str(get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default=""))
-    task_no = str(get_clean_col_val(row, ["任务号", "合同号", "项目编号", "单号"], default=""))
-    lead_raw = get_clean_col_val(row, ["审核组长", "组长", "审核员", "组长姓名", "lead", "姓名"], default="")
-    address = str(get_clean_col_val(row, ["审核地址", "地址", "企业地址", "注册地址"], default=""))
-    scope = str(get_clean_col_val(row, ["审核范围", "认证范围", "范围", "业务范围"], default=""))
-    audit_type_raw = str(get_clean_col_val(row, ["审核类型", "类型", "审核阶段"], default=""))
-    
-    eval_date_raw = get_clean_col_val(row, ["评定通过时间", "评定日期", "决定日期", "日期", "评审日期", "评定时间", "通过时间", "通过日期", "完成日期"], default="")
-    eval_date = clean_date_val(eval_date_raw)
-
-    lead_first = extract_first_person(lead_raw)
-
-    task_upper = task_no.upper()
-    has_ts = "TS" in task_upper or "16949" in audit_type_raw
-    has_er = "ER" in task_upper or "9001" in audit_type_raw
-
-    decision_option = 1
-    if "转移" in audit_type_raw:
-        decision_option = 3
-    elif "监" in audit_type_raw:
-        decision_option = 5
-    elif "初" in audit_type_raw or "再认证" in audit_type_raw:
-        decision_option = 1
-
-    return {
-        "company_name": company_name,
-        "task_no": task_no,
-        "lead": lead_first,
-        "address": address,
-        "scope": scope,
-        "has_ts": has_ts,
-        "has_er": has_er,
-        "audit_type_raw": audit_type_raw,
-        "decision_option": decision_option,
-        "eval_date": eval_date
-    }
+                return col
+    return columns[0] if len(columns) > 0 else None
 
 def remove_invisible_chars(text):
     """清除 Word 文本中常见的零宽空格、软连字符等隐藏控制字符"""
@@ -164,7 +105,7 @@ def update_paragraph_checkboxes(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 替换带隐藏字符干扰的 P26-01-15 等代号
+    # 强制替换 P26-01-15 形式的日期代号
     if data["eval_date"]:
         text = re.sub(r'P\s*\d{2,4}\s*[-–‑—]\s*\d{2}\s*[-–‑—]\s*\d{2}', data["eval_date"], text, flags=re.I)
         text = re.sub(r'(日期[：:])\s*([^\s]*)', r'\1' + data["eval_date"], text)
@@ -313,17 +254,82 @@ if excel_file is not None and template_file is not None:
     try:
         raw_df = pd.read_excel(excel_file)
         template_bytes = template_file.getvalue()
+        columns = list(raw_df.columns)
 
-        parsed_records = [process_row_data(row, idx) for idx, row in raw_df.iterrows() if is_real_data_row(row)]
+        st.subheader("⚙️ Excel 列字段精准映射（确保数据完美提取）")
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        with col_m1:
+            col_comp = st.selectbox("公司名称列", columns, index=columns.index(find_best_column(columns, ["公司名称", "客户名称", "企业名称", "公司"])))
+        with col_m2:
+            col_task = st.selectbox("任务号列", columns, index=columns.index(find_best_column(columns, ["任务号", "合同号", "项目编号"])))
+        with col_m3:
+            col_lead = st.selectbox("审核组长列", columns, index=columns.index(find_best_column(columns, ["审核组长", "组长", "审核员"])))
+        with col_m4:
+            col_date = st.selectbox("📅 评定日期列 (解决P26-01-15的关键)", columns, index=columns.index(find_best_column(columns, ["评定通过时间", "评定日期", "决定日期", "日期", "评审日期", "时间"])))
+
+        col_m5, col_m6, col_m7 = st.columns(3)
+        with col_m5:
+            col_addr = st.selectbox("审核地址列", columns, index=columns.index(find_best_column(columns, ["审核地址", "地址"])))
+        with col_m6:
+            col_scope = st.selectbox("认证范围列", columns, index=columns.index(find_best_column(columns, ["审核范围", "认证范围", "范围"])))
+        with col_m7:
+            col_type = st.selectbox("审核类型列", columns, index=columns.index(find_best_column(columns, ["审核类型", "类型", "阶段"])))
+
+        st.markdown("---")
+
+        parsed_records = []
+        for idx, row in raw_df.iterrows():
+            comp_val = str(row.get(col_comp, ""))
+            task_val = str(row.get(col_task, ""))
+            lead_val = str(row.get(col_lead, ""))
+            
+            # 过滤空行
+            if pd.isna(row.dropna()).all() or (comp_val.lower() in ["nan", "none", "", "0"] and task_val.lower() in ["nan", "none", "", "0"]):
+                continue
+
+            company_name = comp_val if comp_val.lower() not in ["nan", "none"] else ""
+            task_no = task_val if task_val.lower() not in ["nan", "none"] else ""
+            lead_first = extract_first_person(lead_val)
+            address = str(row.get(col_addr, "")) if not pd.isna(row.get(col_addr)) else ""
+            scope = str(row.get(col_scope, "")) if not pd.isna(row.get(col_scope)) else ""
+            audit_type_raw = str(row.get(col_type, "")) if not pd.isna(row.get(col_type)) else ""
+            
+            eval_date_raw = row.get(col_date, "")
+            eval_date = clean_date_val(eval_date_raw)
+
+            task_upper = task_no.upper()
+            has_ts = "TS" in task_upper or "16949" in audit_type_raw
+            has_er = "ER" in task_upper or "9001" in audit_type_raw
+
+            decision_option = 1
+            if "转移" in audit_type_raw:
+                decision_option = 3
+            elif "监" in audit_type_raw:
+                decision_option = 5
+            elif "初" in audit_type_raw or "再认证" in audit_type_raw:
+                decision_option = 1
+
+            parsed_records.append({
+                "company_name": company_name,
+                "task_no": task_no,
+                "lead": lead_first,
+                "address": address,
+                "scope": scope,
+                "has_ts": has_ts,
+                "has_er": has_er,
+                "audit_type_raw": audit_type_raw,
+                "decision_option": decision_option,
+                "eval_date": eval_date
+            })
 
         if not parsed_records:
             st.warning("⚠️ Excel 文件中未读取到有效数据。")
         else:
             st.subheader(f"📋 预览数据（共 {len(parsed_records)} 条）")
             preview_df = pd.DataFrame(parsed_records)[
-                ["company_name", "task_no", "lead", "audit_type_raw", "decision_option", "address", "scope", "eval_date"]
+                ["company_name", "task_no", "lead", "audit_type_raw", "decision_option", "eval_date"]
             ]
-            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "勾选结论选项", "审核地址", "认证范围", "评定/通过日期"]
+            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "勾选结论选项", "评定日期"]
             st.dataframe(preview_df, use_container_width=True)
 
             zip_buffer = io.BytesIO()
