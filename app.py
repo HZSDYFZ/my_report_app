@@ -6,464 +6,262 @@ import pandas as pd
 import streamlit as st
 from docx import Document
 
-# 页面基础配置
 st.set_page_config(
-    page_title="认证评定报告生成系统", page_icon="📄", layout="wide"
+    page_title="认证评定报告自动化生成系统", page_icon="📄", layout="wide"
 )
 
-
 # ==========================================
-# 1. 核心解析与清洗引擎
+# 1. 字段清洗与条件判定函数
 # ==========================================
-def parse_and_fix_excel(file_buffer):
-    """解析 Excel 多表并完成清洗脱敏"""
-    xls = pd.ExcelFile(file_buffer)
+def extract_first_person(lead_str):
+    """提取审核组长字段中的第一个人名"""
+    if pd.isna(lead_str) or not str(lead_str).strip():
+        return "未填写"
+    parts = re.split(r'[ ,，/、+&\t\n]+', str(lead_str).strip())
+    return parts[0] if parts else ""
 
-    df1 = pd.read_excel(xls, sheet_name="Sheet1")
-    df2 = (
-        pd.read_excel(xls, sheet_name="Sheet2")
-        if "Sheet2" in xls.sheet_names
-        else pd.DataFrame()
-    )
-    df3 = (
-        pd.read_excel(xls, sheet_name="Sheet3")
-        if "Sheet3" in xls.sheet_names
-        else pd.DataFrame()
-    )
-    df4 = (
-        pd.read_excel(xls, sheet_name="Sheet4")
-        if "Sheet4" in xls.sheet_names
-        else pd.DataFrame()
-    )
+def get_column_value(row, possible_keys, default=""):
+    """安全获取指定列名的值"""
+    for key in possible_keys:
+        for col in row.index:
+            if key.lower() in str(col).lower():
+                val = str(row[col]).strip()
+                if val and val.lower() not in ["nan", "none", "null"]:
+                    return val
+    return default
 
-    if not df3.empty:
-        df3 = df3.rename(
-            columns={
-                df3.columns[0]: "任务号",
-                "Observations": "Sheet3_结论",
-                "Date": "Sheet3_日期",
-            }
-        )
-        df3 = df3.drop_duplicates(subset=["任务号"], keep="first")
+def process_row_data(row, index):
+    """将 Excel 的单行数据按照规则解析为填充字典"""
+    task_no = get_column_value(row, ["任务号", "file number"], default=f"TASK_{index+1}")
+    company_name = get_column_value(row, ["公司名称", "客户名称", "企业名称"], default="未知企业")
+    lead_raw = get_column_value(row, ["审核组长", "组长"], default="")
+    address = get_column_value(row, ["审核地址", "地址"], default="未填写")
+    scope = get_column_value(row, ["审核范围", "认证范围", "范围"], default="未填写")
+    audit_type_raw = get_column_value(row, ["审核类型"], default="")
 
-    if not df4.empty:
-        df4.columns = df4.iloc[0]
-        df4 = df4[1:].reset_index(drop=True)
-        df4 = df4.rename(columns={"File number(s)": "任务号"})
-        df4 = df4.drop_duplicates(subset=["任务号"], keep="first")
+    # 1. 提取组长第一个人名
+    lead_first = extract_first_person(lead_raw)
 
-    if not df2.empty and "任务号" in df2.columns:
-        df2 = df2.drop_duplicates(subset=["任务号"], keep="first")
+    # 2. 依据任务号判定认证标准勾选 (TS -> IATF16949, ER -> ISO9001)
+    task_no_upper = task_no.upper()
+    has_ts = "TS" in task_no_upper
+    has_er = "ER" in task_no_upper
 
-    master_list = []
+    # 3. 依据审核类型字段判定勾选
+    is_surveillance = "监" in audit_type_raw
+    is_first = "一阶段" in audit_type_raw or "二阶段" in audit_type_raw
+    is_recert = "再认证" in audit_type_raw or "转移" in audit_type_raw
 
-    for idx, row in df1.iterrows():
-        task_no = str(row.get("任务号", "")).strip()
-
-        row2 = (
-            df2[df2["任务号"] == task_no].iloc[0]
-            if (not df2.empty and task_no in df2["任务号"].values)
-            else pd.Series()
-        )
-        row3 = (
-            df3[df3["任务号"] == task_no].iloc[0]
-            if (not df3.empty and task_no in df3["任务号"].values)
-            else pd.Series()
-        )
-        row4 = (
-            df4[df4["任务号"] == task_no].iloc[0]
-            if (not df4.empty and task_no in df4["任务号"].values)
-            else pd.Series()
-        )
-
-        # 公司名称提取与邮箱污染修正
-        s1_company = str(row.get("客户名称 Client Name", "")).strip()
-        s2_company = (
-            str(row2.get("企业中文名字", row2.get("企业名称", ""))).strip()
-            if not row2.empty
-            else ""
-        )
-        s4_company = (
-            str(row4.get("Company name", "")).strip() if not row4.empty else ""
-        )
-
-        if (
-            "@" in s1_company
-            or not s1_company
-            or s1_company.lower() in ["nan", "none", "null"]
-        ):
-            company_name = (
-                s2_company
-                if s2_company and s2_company.lower() != "nan"
-                else (
-                    s4_company
-                    if s4_company and s4_company.lower() != "nan"
-                    else "未知企业"
-                )
-            )
-        else:
-            company_name = s1_company
-
-        # 英文名称
-        company_en = (
-            str(
-                row2.get(
-                    "企业英文名字",
-                    s4_company if s4_company != company_name else "",
-                )
-            ).strip()
-            if not row2.empty
-            else s4_company
-        )
-        if company_en.lower() in ["nan", "none", "null"]:
-            company_en = ""
-
-        # 审核团队组合
-        lead = str(
-            row.get("审核组长", row2.get("组长", "") if not row2.empty else "")
-        ).strip()
-        members = (
-            str(row2.get("组员", "")).strip()
-            if (not row2.empty and pd.notna(row2.get("组员")))
-            else ""
-        )
-        team_str = (
-            f"{lead} (成员: {members})"
-            if (members and members.lower() != "nan")
-            else lead
-        )
-
-        # 审核地址清洗
-        address = str(row.get("审核地址", "")).strip()
-        if (
-            re.match(r"^\d{4}[-/]\d{2}[-/]\d{2}", address)
-            or address.lower() in ["nan", "none", "null", ""]
-        ):
-            real_address = (
-                str(row2.get("审核地址", "")).strip() if not row2.empty else ""
-            )
-            address = (
-                real_address if real_address.lower() != "nan" else "未填写"
-            )
-
-        # 认证范围与标准
-        scope = str(row.get("认证范围", "")).strip()
-        if not scope or scope.lower() in ["nan", "none", "null"]:
-            scope = (
-                str(row2.get("审核范围", "")).strip() if not row2.empty else ""
-            )
-        if scope.lower() in ["nan", "none", "null"]:
-            scope = ""
-
-        standard = (
-            str(row2.get("标准", "")).strip() if not row2.empty else "ISO/IATF"
-        )
-        if standard.lower() in ["nan", "none", "null"]:
-            standard = ""
-
-        # 认证结论与日期
-        decision = str(row.get("认证决定结论", "")).strip()
-        if not decision or decision.lower() in ["nan", "none", "null"]:
-            decision = (
-                str(
-                    row3.get("Sheet3_结论", row4.get("Observations", ""))
-                ).strip()
-                if not row3.empty
-                else ""
-            )
-
-        date_val = str(row.get("日期", "")).strip()
-        if not date_val or date_val.lower() in ["nan", "0", "none"]:
-            date_val = (
-                str(
-                    row3.get("Sheet3_日期", row4.get("VP pass date", ""))
-                ).strip()
-                if not row3.empty
-                else ""
-            )
-
-        master_list.append(
-            {
-                "序号": row.get("项目序号 No.", idx + 1),
-                "合同号": (
-                    str(row.get("合同号 Contract No.", "")).strip()
-                    if str(row.get("合同号 Contract No.", "")).lower() != "nan"
-                    else ""
-                ),
-                "任务号": task_no,
-                "公司中文名": company_name,
-                "公司英文名": company_en,
-                "审核类型": (
-                    str(
-                        row.get(
-                            "审核类型Audit Type",
-                            row2.get("审核类型", "")
-                            if not row2.empty
-                            else "",
-                        )
-                    ).strip()
-                ),
-                "认证标准": standard,
-                "审核团队": team_str,
-                "评定人员": (
-                    str(
-                        row.get(
-                            "评定人员",
-                            row2.get("评定人员", "") if not row2.empty else "",
-                        )
-                    ).strip()
-                ),
-                "审核地址": address,
-                "认证范围": scope,
-                "认证结论": decision,
-                "结论日期": (
-                    date_val
-                    if date_val.lower() not in ["nan", "none", "null", "0"]
-                    else ""
-                ),
-            }
-        )
-
-    return pd.DataFrame(master_list)
+    return {
+        "company_name": company_name,
+        "task_no": task_no,
+        "lead": lead_first,
+        "address": address,
+        "scope": scope,
+        "has_ts": has_ts,
+        "has_er": has_er,
+        "is_first": is_first,
+        "is_surveillance": is_surveillance,
+        "is_recert": is_recert
+    }
 
 
 # ==========================================
-# 2. 报告生成引擎
+# 2. Word 模板填充引擎
 # ==========================================
-def fill_word_template_single(data_dict, template_bytes=None):
-    """单条记录 Word 模板填充引擎"""
-    if template_bytes:
-        doc = Document(io.BytesIO(template_bytes))
+def fill_word_template(template_bytes, data):
+    """根据解析后的规则填充 Word 模板"""
+    doc = Document(io.BytesIO(template_bytes))
 
-        def replace_in_paragraphs(paragraphs, data):
-            for p in paragraphs:
-                for k, v in data.items():
-                    tag = f"{{{{{k}}}}}"
-                    if tag in p.text:
-                        p.text = p.text.replace(
-                            tag, str(v) if pd.notna(v) and v != "" else ""
-                        )
+    # 构建标准与类型的文本框表示
+    ts_box = "☑ IATF16949:2016" if data['has_ts'] else "☐ IATF16949:2016"
+    er_box = "☑ ISO9001:2015" if data['has_er'] else "☐ ISO9001:2015"
+    standards_str = f"{ts_box}   {er_box}"
 
-        replace_in_paragraphs(doc.paragraphs, data_dict)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    replace_in_paragraphs(cell.paragraphs, data_dict)
-    else:
-        doc = Document()
-        doc.add_heading(f"认证评定单项报告 - {data_dict['公司中文名']}", level=1)
+    first_box = "☑ 初审" if data['is_first'] else "☐ 初审"
+    surv_box = "☑ 监审" if data['is_surveillance'] else "☐ 监审"
+    recert_box = "☑ 再认证/转移" if data['is_recert'] else "☐ 再认证/转移"
+    audit_type_str = f"{first_box}   {surv_box}   {recert_box}"
 
-        p = doc.add_paragraph()
-        p.add_run("• 公司中文名：").bold = True
-        p.add_run(f"{data_dict['公司中文名']}\n")
+    # 标签替换字典
+    tags = {
+        "{{公司名称}}": data['company_name'],
+        "{{任务号}}": data['task_no'],
+        "{{审核组长}}": data['lead'],
+        "{{组长}}": data['lead'],
+        "{{审核地址}}": data['address'],
+        "{{审核范围}}": data['scope'],
+        "{{认证标准}}": standards_str,
+        "{{审核类型}}": audit_type_str,
+    }
 
-        p.add_run("• 公司英文名：").bold = True
-        p.add_run(f"{data_dict['公司英文名']}\n")
+    def process_paragraph(p):
+        full_text = p.text
+        if not full_text:
+            return
 
-        p.add_run("• 任务号：").bold = True
-        p.add_run(f"{data_dict['任务号']}   |   ")
-        p.add_run("合同号：").bold = True
-        p.add_run(f"{data_dict['合同号']}\n")
+        # A. 占位标签替换 {{...}}
+        for tag, val in tags.items():
+            if tag in full_text:
+                full_text = full_text.replace(tag, str(val))
 
-        p.add_run("• 认证标准：").bold = True
-        p.add_run(f"{data_dict['认证标准']}   |   ")
-        p.add_run("审核类型：").bold = True
-        p.add_run(f"{data_dict['审核类型']}\n")
+        # B. 冒号标签定位替换 (例如 "公司名称：" 后的文本)
+        if re.search(r"公司名称[:：]", full_text) and data['company_name'] not in full_text:
+            full_text = re.sub(r"(公司名称[:：])\s*.*", r"\1 " + str(data['company_name']), full_text)
 
-        p.add_run("• 审核团队：").bold = True
-        p.add_run(f"{data_dict['审核团队']}   |   ")
-        p.add_run("评定人员：").bold = True
-        p.add_run(f"{data_dict['评定人员']}\n")
+        if re.search(r"任务号[:：]", full_text) and data['task_no'] not in full_text:
+            full_text = re.sub(r"(任务号[:：])\s*.*", r"\1 " + str(data['task_no']), full_text)
 
-        p.add_run("• 认证结论：").bold = True
-        p.add_run(f"{data_dict['认证结论']}   |   结论日期：{data_dict['结论日期']}\n")
+        if re.search(r"(审核组长|组长)[:：]", full_text) and data['lead'] not in full_text:
+            full_text = re.sub(r"((?:审核组长|组长)[:：])\s*.*", r"\1 " + str(data['lead']), full_text)
 
-        p.add_run("• 审核地址：").bold = True
-        p.add_run(f"{data_dict['审核地址']}\n")
+        if re.search(r"审核地址[:：]", full_text) and data['address'] not in full_text:
+            full_text = re.sub(r"(审核地址[:：])\s*.*", r"\1 " + str(data['address']), full_text)
 
-        p.add_run("• 认证范围：").bold = True
-        p.add_run(f"{data_dict['认证范围']}")
+        if re.search(r"(审核范围|认证范围)[:：]", full_text) and data['scope'] not in full_text:
+            full_text = re.sub(r"((?:审核范围|认证范围)[:：])\s*.*", r"\1 " + str(data['scope']), full_text)
 
-    target_stream = io.BytesIO()
-    doc.save(target_stream)
-    target_stream.seek(0)
-    return target_stream.getvalue()
+        # C. 复选框符号自动勾选替换
+        if "IATF16949" in full_text and data['has_ts']:
+            full_text = re.sub(r"[☐\[ \]口]\s*IATF16949:2016", "☑ IATF16949:2016", full_text)
+        if "ISO9001" in full_text and data['has_er']:
+            full_text = re.sub(r"[☐\[ \]口]\s*ISO9001:2015", "☑ ISO9001:2015", full_text)
+
+        if data['is_first']:
+            full_text = re.sub(r"[☐\[ \]口]\s*初审", "☑ 初审", full_text)
+        if data['is_surveillance']:
+            full_text = re.sub(r"[☐\[ \]口]\s*监审", "☑ 监审", full_text)
+        if data['is_recert']:
+            full_text = re.sub(r"[☐\[ \]口]\s*(再认证/转移|再认证)", "☑ 再认证/转移", full_text)
+
+        if full_text != p.text:
+            p.text = full_text
+
+    # 遍历段落与表格
+    for p in doc.paragraphs:
+        process_paragraph(p)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    process_paragraph(p)
+
+    out_stream = io.BytesIO()
+    doc.save(out_stream)
+    out_stream.seek(0)
+    return out_stream.getvalue()
 
 
-def generate_word_zip_batch(df, template_bytes=None):
-    """批量独立 Word 报告生成并打包 ZIP"""
+# ==========================================
+# 3. 批量打压 ZIP 包逻辑
+# ==========================================
+def generate_batch_zip(df, template_bytes):
+    """遍历 Excel 每一行生成独立 Word 并打包 ZIP"""
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for idx, row in df.iterrows():
-            data_dict = row.to_dict()
-            doc_bytes = fill_word_template_single(data_dict, template_bytes)
+            data = process_row_data(row, idx)
+            doc_bytes = fill_word_template(template_bytes, data)
 
-            raw_company = str(data_dict.get("公司中文名", f"企业_{idx + 1}"))
-            company_name = re.sub(r'[\\/*?:"<>|]', "_", raw_company)
-            task_no = re.sub(
-                r'[\\/*?:"<>|]', "_", str(data_dict.get("任务号", ""))
-            )
+            clean_company = re.sub(r'[\\/*?:"<>|]', "_", data["company_name"])
+            clean_task = re.sub(r'[\\/*?:"<>|]', "_", data["task_no"])
 
-            filename = (
-                f"{company_name}_{task_no}_评定报告.docx"
-                if task_no
-                else f"{company_name}_评定报告.docx"
-            )
+            filename = f"{clean_company}_{clean_task}_评定报告.docx"
             zf.writestr(filename, doc_bytes)
 
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
 
 
-def generate_excel_bytes(df):
-    """批量导出 Excel 表格"""
-    target_stream = io.BytesIO()
-    with pd.ExcelWriter(target_stream, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="认证评定解析表")
-    target_stream.seek(0)
-    return target_stream.getvalue()
-
-
 # ==========================================
-# 3. Streamlit 界面布局 (仅保留两个核心模式)
+# 4. Streamlit 界面
 # ==========================================
-st.title("🛡️ 认证评定报告生成系统")
+st.title("🛡️ 认证评定报告自动化生成系统")
 
-# 文件上传区
-c1, c2 = st.columns(2)
-with c1:
+col1, col2 = st.columns(2)
+with col1:
     excel_file = st.file_uploader(
-        "1. 上传认证评定 Excel 数据文件 (.xlsx / .xls)",
-        type=["xlsx", "xls"],
+        "1. 上传 Excel 数据文件 (.xlsx / .xls) 【必选】",
+        type=["xlsx", "xls"]
     )
-with c2:
+with col2:
     template_file = st.file_uploader(
-        "2. (可选) 上传自定义 Word 模板 (.docx)", type=["docx"]
+        "2. 上传 Word 模板文件 (.docx) 【必选】",
+        type=["docx"]
     )
-    with st.expander("💡 占位符提示"):
-        st.caption(
-            "模板标签：`{{公司中文名}}` `{{公司英文名}}` `{{任务号}}` `{{合同号}}` `{{审核团队}}` `{{评定人员}}` `{{认证标准}}` `{{审核类型}}` `{{审核地址}}` `{{认证范围}}` `{{认证结论}}` `{{结论日期}}`"
-        )
 
-template_bytes = template_file.getvalue() if template_file else None
+st.markdown("---")
 
-# 仅保留两个核心 Tab 模式
-tab_single, tab_batch = st.tabs(
-    ["🎯 单条报告生成", "📦 批量导出报告 (ZIP)"]
-)
+tab_single, tab_batch = st.tabs(["🎯 单条记录生成", "📦 生成多个报告 (Batch Generate)"])
 
-if excel_file is not None:
+# 强制校验：必须同时上传 Excel 和 Word 模板
+if excel_file is not None and template_file is not None:
     try:
-        df_master = parse_and_fix_excel(excel_file)
+        df = pd.read_excel(excel_file)
+        template_bytes = template_file.getvalue()
 
-        # 侧边栏搜索与过滤
-        st.sidebar.header("🔍 数据检索与筛选")
-        search_kw = st.sidebar.text_input("搜索企业名称/任务号:")
-        selected_decision = st.sidebar.multiselect(
-            "按认证结论筛选:",
-            options=df_master["认证结论"].unique().tolist(),
-            default=[],
-        )
-        selected_standard = st.sidebar.multiselect(
-            "按认证标准筛选:",
-            options=df_master["认证标准"].unique().tolist(),
-            default=[],
-        )
-
-        filtered_df = df_master.copy()
-        if search_kw:
-            filtered_df = filtered_df[
-                filtered_df["公司中文名"].str.contains(search_kw, na=False)
-                | filtered_df["任务号"].str.contains(search_kw, na=False)
-                | filtered_df["公司英文名"].str.contains(search_kw, na=False)
-            ]
-        if selected_decision:
-            filtered_df = filtered_df[
-                filtered_df["认证结论"].isin(selected_decision)
-            ]
-        if selected_standard:
-            filtered_df = filtered_df[
-                filtered_df["认证标准"].isin(selected_standard)
-            ]
-
-        # ------------------------------------
-        # 模式一：单条报告生成
-        # ------------------------------------
+        # ------------------------------------------
+        # Tab 1: 单条记录生成
+        # ------------------------------------------
         with tab_single:
-            st.subheader("🎯 选定企业生成单项报告")
-            company_list = filtered_df["公司中文名"].tolist()
+            st.subheader("🎯 选择单条记录进行单独生成")
+            
+            records_data = [process_row_data(row, idx) for idx, row in df.iterrows()]
+            company_names = [d["company_name"] for d in records_data]
 
-            if company_list:
-                selected_company = st.selectbox(
-                    "选择目标企业:", options=company_list
-                )
-                single_dict = filtered_df[
-                    filtered_df["公司中文名"] == selected_company
-                ].iloc[0].to_dict()
+            selected_company = st.selectbox("请选择要生成报告的企业：", options=company_names)
+            
+            selected_idx = company_names.index(selected_company)
+            single_data = records_data[selected_idx]
 
-                st.info(
-                    f"**已选目标**：{single_dict['公司中文名']}（任务号: {single_dict['任务号']}）"
-                )
+            st.info(f"**已选中企业**：{single_data['company_name']}（任务号: {single_data['task_no']}）")
+            
+            c_a, c_b = st.columns(2)
+            with c_a:
+                st.write(f"**提取的组长**: {single_data['lead']}")
+                st.write(f"**审核地址**: {single_data['address']}")
+                st.write(f"**审核范围**: {single_dict['scope'] if 'single_dict' in locals() else single_data['scope']}")
+            with c_b:
+                st.write(f"**TS 认证 (IATF16949)**: {'☑ 勾选' if single_data['has_ts'] else '☐ 未勾选'}")
+                st.write(f"**ER 认证 (ISO9001)**: {'☑ 勾选' if single_data['has_er'] else '☐ 未勾选'}")
+                audit_type_desc = []
+                if single_data['is_first']: audit_type_desc.append("初审")
+                if single_data['is_surveillance']: audit_type_desc.append("监审")
+                if single_data['is_recert']: audit_type_desc.append("再认证/转移")
+                st.write(f"**勾选的审核类型**: {', '.join(audit_type_desc) if audit_type_desc else '无'}")
 
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.write(f"**公司英文名**: {single_dict['公司英文名']}")
-                    st.write(f"**合同号**: {single_dict['合同号']}")
-                    st.write(f"**审核团队**: {single_dict['审核团队']}")
-                    st.write(f"**评定人员**: {single_dict['评定人员']}")
-                    st.write(f"**认证标准**: {single_dict['认证标准']}")
-                with col_b:
-                    st.write(f"**审核类型**: {single_dict['审核类型']}")
-                    st.write(f"**认证结论**: {single_dict['认证结论']}")
-                    st.write(f"**结论日期**: {single_dict['结论日期']}")
-                    st.write(f"**审核地址**: {single_dict['审核地址']}")
-                    st.write(f"**认证范围**: {single_dict['认证范围']}")
+            st.markdown("---")
 
-                st.markdown("---")
-
-                s_word_bytes = fill_word_template_single(
-                    single_dict, template_bytes
-                )
-                st.download_button(
-                    label="📄 下载该企业 Word 报告",
-                    data=s_word_bytes,
-                    file_name=f"{single_dict['公司中文名']}_评定报告.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
-            else:
-                st.warning("无匹配筛选条件的记录。")
-
-        # ------------------------------------
-        # 模式二：批量报告导出 (ZIP)
-        # ------------------------------------
-        with tab_batch:
-            st.subheader("📦 批量导出每个企业的独立 Word 报告")
-            st.write(f"当前筛选记录数：**{len(filtered_df)}** 条")
-
-            btn_col1, btn_col2 = st.columns(2)
-
-            # 导出 ZIP 包
-            zip_bytes = generate_word_zip_batch(filtered_df, template_bytes)
-            btn_col1.download_button(
-                label="📦 批量下载所有企业 Word 报告压缩包 (.zip)",
-                data=zip_bytes,
-                file_name="批量认证评定报告包.zip",
-                mime="application/zip",
+            single_doc_bytes = fill_word_template(template_bytes, single_data)
+            st.download_button(
+                label=f"📄 下载【{single_data['company_name']}】 Word 报告",
+                data=single_doc_bytes,
+                file_name=f"{single_data['company_name']}_{single_data['task_no']}_评定报告.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
 
-            # 导出 Excel 汇总
-            excel_bytes = generate_excel_bytes(filtered_df)
-            btn_col2.download_button(
-                label="📊 导出当前筛选数据 Excel (.xlsx)",
-                data=excel_bytes,
-                file_name="认证评定记录_筛选汇总.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        # ------------------------------------------
+        # Tab 2: 批量生成多个报告
+        # ------------------------------------------
+        with tab_batch:
+            st.subheader("📦 批量导出所有企业的 Word 报告 (.zip)")
+            st.write(f"Excel 中共需生成 **{len(df)}** 份独立报告。")
+
+            zip_data = generate_batch_zip(df, template_bytes)
+            st.download_button(
+                label="📦 一键打包下载所有 Word 报告 (.zip)",
+                data=zip_data,
+                file_name="批量认证评定报告包.zip",
+                mime="application/zip"
             )
 
     except Exception as e:
-        st.error(f"解析文件出错: {str(e)}")
+        st.error(f"处理文件时出错，请检查输入格式：{str(e)}")
+
 else:
+    warning_msg = "⚠️ 请在上方同时上传 **Excel 数据文件** 和 **Word 模板文件** 以后开启生成功能。"
     with tab_single:
-        st.info("👈 请在上方上传 Excel 文件以开启操作。")
+        st.warning(warning_msg)
     with tab_batch:
-        st.info("👈 请在上方上传 Excel 文件以开启操作。")
+        st.warning(warning_msg)
