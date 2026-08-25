@@ -33,13 +33,16 @@ def clean_date_val(val):
     if not val_str or val_str.lower() in ["nan", "none", "null", "nat", "0", "undefined"]:
         return ""
     
-    match = re.search(r'P?(\d{2,4})[-–‑—](\d{2})[-–‑—](\d{2})', val_str, re.IGNORECASE)
+    # 仅匹配纯数字或标准日期横杠，绝对不碰带 P 的表单编号
+    match = re.search(r'(\d{2,4})[-–‑—](\d{1,2})[-–‑—](\d{1,2})', val_str)
     if match:
         groups = match.groups()
-        if len(groups[0]) == 4:
-            return f"{groups[0]}-{groups[1]}-{groups[2]}"
-        else:
-            return f"20{groups[0]}-{groups[1]}-{groups[2]}"
+        year = groups[0]
+        if len(year) == 2:
+            year = "20" + year
+        month = groups[1].zfill(2)
+        day = groups[2].zfill(2)
+        return f"{year}-{month}-{day}"
 
     try:
         f_val = float(val_str)
@@ -85,7 +88,7 @@ def remove_invisible_chars(text):
     return re.sub(r'[\u200b\u200c\u200d\u00ad\ufeff]', '', text)
 
 def process_paragraph_text(p, data):
-    """处理段落文本，将日期准确填入“日期：”后面"""
+    """处理段落文本，准确将日期填入“日期：”后面（绝不碰 P 开头的表单号）"""
     try:
         raw_text = p.text
     except Exception:
@@ -117,11 +120,11 @@ def process_paragraph_text(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 2. 强力匹配“日期：”、“评定日期：”等字样，将中文日期填在后面
+    # 2. 精准匹配“日期：”、“评定日期：”等字样，将中文日期填在后面
     if chinese_date:
         for prefix in ["评定日期", "评审日期", "决定日期", "日期"]:
             if prefix in text:
-                # 匹配 “日期：”后面跟着的空白或旧文本，替换为标准中文日期
+                # 匹配 “日期：”后面跟着的文字并替换，但绝不影响不相关的文字
                 pattern = r'(' + prefix + r'\s*[：:]\s*)([^\s\n]*)'
                 text = re.sub(pattern, r'\1' + chinese_date, text)
 
