@@ -24,7 +24,7 @@ def extract_first_person(lead_str):
     return parts[0] if parts and parts[0] else ""
 
 def clean_date_val(val):
-    """将 Excel 日期序列号、P26-04-01 或文本统一转换为 YYYY-MM-DD 格式"""
+    """将 Excel 日期统一转换为标准 YYYY-MM-DD 格式"""
     if pd.isna(val):
         return ""
     if isinstance(val, (pd.Timestamp, datetime)):
@@ -58,6 +58,16 @@ def clean_date_val(val):
         
     return val_str.split(" ")[0]
 
+def format_chinese_date(date_str):
+    """将 YYYY-MM-DD 转换为 某年某月某日 格式"""
+    if not date_str:
+        return ""
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return f"{dt.year}年{dt.month}月{dt.day}日"
+    except Exception:
+        return date_str
+
 def find_best_column(columns, possible_keys):
     """智能匹配表头"""
     for key in possible_keys:
@@ -69,13 +79,13 @@ def find_best_column(columns, possible_keys):
     return columns[0] if len(columns) > 0 else None
 
 def remove_invisible_chars(text):
-    """清除 Word 文本中常见的零宽空格、软连字符等隐藏控制字符"""
+    """清除 Word 文本中常见的零宽空格等隐藏控制字符"""
     if not text:
         return ""
     return re.sub(r'[\u200b\u200c\u200d\u00ad\ufeff]', '', text)
 
 def process_paragraph_text(p, data):
-    """终极段落文本清洗与替换（强制穿透 Word 拆分项与特殊连字符）"""
+    """处理段落文本，将日期准确填入“日期：”后面"""
     try:
         raw_text = p.text
     except Exception:
@@ -84,6 +94,7 @@ def process_paragraph_text(p, data):
         return
 
     text = remove_invisible_chars(raw_text)
+    chinese_date = format_chinese_date(data["eval_date"])
 
     # 1. 常规占位符替换
     replacements = {
@@ -92,35 +103,27 @@ def process_paragraph_text(p, data):
         "{{审核组长}}": data["lead"],
         "{{审核地址}}": data["address"],
         "{{审核范围}}": data["scope"],
-        "{{评定日期}}": data["eval_date"],
-        "{{评定通过时间}}": data["eval_date"],
+        "{{评定日期}}": chinese_date,
+        "{{评定通过时间}}": chinese_date,
         "【公司名称】": data["company_name"],
         "【任务号】": data["task_no"],
         "【审核组长】": data["lead"],
         "【审核地址】": data["address"],
         "【审核范围】": data["scope"],
-        "【评定日期】": data["eval_date"],
-        "【评定通过时间】": data["eval_date"],
+        "【评定日期】": chinese_date,
+        "【评定通过时间】": chinese_date,
     }
     for k, v in replacements.items():
         if k in text:
             text = text.replace(k, str(v))
 
-    # 2. 强力匹配并把预览日期放到“日期：”后面（针对 P26-01-15 等各种变体）
-    if data["eval_date"]:
-        # 将所有可能的奇异连字符统一替换为标准减号以便正则稳定捕捉
-        normalized_text = text
-        for dash in ['–', '‑', '—', '−']:
-            normalized_text = normalized_text.replace(dash, '-')
-            
-        # 匹配 P 后面带日期数字的代号（如 P26-01-15）
-        date_pattern = re.compile(r'P\s*\d{2,4}\s*-\s*\d{2}\s*-\s*\d{2}', re.I)
-        if date_pattern.search(normalized_text):
-            text = date_pattern.sub(f"日期：{data['eval_date']}", normalized_text)
-        
-        # 匹配已有“日期：”但后面没填对的情况
-        if "日期" in text:
-            text = re.sub(r'(日期[：:])\s*([^\s]*)', r'\1' + data["eval_date"], text)
+    # 2. 强力匹配“日期：”、“评定日期：”等字样，将中文日期填在后面
+    if chinese_date:
+        for prefix in ["评定日期", "评审日期", "决定日期", "日期"]:
+            if prefix in text:
+                # 匹配 “日期：”后面跟着的空白或旧文本，替换为标准中文日期
+                pattern = r'(' + prefix + r'\s*[：:]\s*)([^\s\n]*)'
+                text = re.sub(pattern, r'\1' + chinese_date, text)
 
     # 3. 复选框状态更新
     if "16949" in text:
@@ -210,8 +213,9 @@ def process_table_safely(table, data):
                     p.text = f"认证范围：{data['scope']}"
 
             if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间", "通过日期"]:
-                if cell.paragraphs and data["eval_date"]:
-                    cell.paragraphs[0].text = f"日期：{data['eval_date']}"
+                chinese_date = format_chinese_date(data["eval_date"])
+                if cell.paragraphs and chinese_date:
+                    cell.paragraphs[0].text = f"日期：{chinese_date}"
 
             if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
                 format_decision_options(cell, data)
