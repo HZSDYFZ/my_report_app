@@ -9,10 +9,10 @@ from datetime import datetime
 
 st.set_page_config(page_title="认证评定报告自动化生成系统", page_icon="📄", layout="wide")
 
-BOX_PATTERN = re.compile(r"[□☐\[\]口]")
+BOX_PATTERN = re.compile(r"^[□☐☑✔\[\]口\s]+")
 
 def extract_first_person(lead_str):
-    """提取审核组长姓名"""
+    """提取审核组长第一个姓名"""
     if pd.isna(lead_str) or not str(lead_str).strip():
         return ""
     s = str(lead_str).strip()
@@ -22,7 +22,7 @@ def extract_first_person(lead_str):
     return parts[0] if parts and parts[0] else ""
 
 def get_clean_col_val(row, possible_keys, default=""):
-    """多列名模糊匹配与格式化"""
+    """多表头列名模糊匹配"""
     for key in possible_keys:
         for col in row.index:
             col_clean = str(col).replace(" ", "").replace("\n", "").lower()
@@ -42,9 +42,9 @@ def is_real_data_row(row):
     """过滤 Excel 尾部空白/汇总行"""
     if row.dropna().empty:
         return False
-    comp = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "公司"], default="")
+    comp = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default="")
     task = get_clean_col_val(row, ["任务号", "合同号", "项目编号"], default="")
-    lead = get_clean_col_val(row, ["审核组长", "组长", "审核员"], default="")
+    lead = get_clean_col_val(row, ["审核组长", "组长", "审核员", "组长姓名"], default="")
 
     invalid_words = ["", "nan", "none", "null", "未知企业", "未填写", "0"]
     if comp.lower() in invalid_words and task.lower() in invalid_words and lead.lower() in invalid_words:
@@ -54,22 +54,27 @@ def is_real_data_row(row):
     return True
 
 def process_row_data(row, index):
-    """提取 Excel 数据并计算结论勾选逻辑"""
-    company_name = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "公司"], default="")
-    task_no = get_clean_col_val(row, ["任务号", "合同号", "项目编号"], default=f"TASK_{index+1}")
-    lead_raw = get_clean_col_val(row, ["审核组长", "组长", "审核员"], default="")
-    address = get_clean_col_val(row, ["审核地址", "地址", "企业地址"], default="")
-    scope = get_clean_col_val(row, ["审核范围", "认证范围", "范围"], default="")
-    audit_type_raw = get_clean_col_val(row, ["审核类型", "audit type"], default="")
-    eval_date = get_clean_col_val(row, ["评定日期", "决定日期", "日期"], default="")
+    """提取单行 Excel 数据并计算结论勾选逻辑"""
+    company_name = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default="")
+    task_no = get_clean_col_val(row, ["任务号", "合同号", "项目编号", "单号"], default=f"TASK_{index+1}")
+    lead_raw = get_clean_col_val(row, ["审核组长", "组长", "审核员", "组长姓名", "lead", "姓名"], default="")
+    address = get_clean_col_val(row, ["审核地址", "地址", "企业地址", "注册地址"], default="")
+    scope = get_clean_col_val(row, ["审核范围", "认证范围", "范围", "业务范围"], default="")
+    audit_type_raw = get_clean_col_val(row, ["审核类型", "类型", "审核阶段"], default="")
+    eval_date = get_clean_col_val(row, ["评定日期", "决定日期", "日期", "评审日期"], default="")
 
     lead_first = extract_first_person(lead_raw)
 
-    # 结论勾选判定:
-    # 红色 (初审/再认证)   -> 第 1 个勾
-    # 黄色 (转移)          -> 第 3 个勾
-    # 青色 (监一/监二/监审)-> 第 5 个勾
-    decision_option = 0
+    # 标志判断
+    task_upper = task_no.upper()
+    has_ts = "TS" in task_upper or "16949" in audit_type_raw
+    has_er = "ER" in task_upper or "9001" in audit_type_raw
+
+    # 结论勾选目标选项位置 (1-based index)
+    # 红色（初审/再认证） -> 第 1 项
+    # 黄色（转移）        -> 第 3 项
+    # 青色（监一/监二/监审）-> 第 5 项
+    decision_option = 1
     if "转移" in audit_type_raw:
         decision_option = 3
     elif "监" in audit_type_raw:
@@ -83,110 +88,135 @@ def process_row_data(row, index):
         "lead": lead_first,
         "address": address,
         "scope": scope,
+        "has_ts": has_ts,
+        "has_er": has_er,
         "audit_type_raw": audit_type_raw,
         "decision_option": decision_option,
         "eval_date": eval_date
     }
 
-def replace_placeholders_in_paragraph(p, data):
-    """段落文本内精准替换占位符，不损毁样式"""
-    if not p.text:
+def update_paragraph_checkboxes(p, data):
+    """替换段落内现有的标准/类型复选框"""
+    text = p.text
+    if not text.strip():
         return
+
+    # 替换占位符
     replacements = {
         "{{公司名称}}": data["company_name"],
-        "{{客户名称}}": data["company_name"],
         "{{任务号}}": data["task_no"],
         "{{审核组长}}": data["lead"],
-        "{{组长}}": data["lead"],
         "{{审核地址}}": data["address"],
-        "{{地址}}": data["address"],
         "{{审核范围}}": data["scope"],
-        "{{范围}}": data["scope"],
         "{{评定日期}}": data["eval_date"],
-        "{{日期}}": data["eval_date"],
-        "{{审核类型}}": data["audit_type_raw"],
     }
-    text = p.text
     for k, v in replacements.items():
         if k in text:
             text = text.replace(k, str(v))
+
+    # 认证标准与审核类型复选框
+    if "16949" in text:
+        sym = "☑" if data["has_ts"] else "☐"
+        text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", text, flags=re.I)
+    if "9001" in text:
+        sym = "☑" if data["has_er"] else "☐"
+        text = re.sub(r"[□☐☑✔]\s*(ISO\s*9001)", f"{sym} \\1", text, flags=re.I)
+    if "初审" in text:
+        sym = "☑" if ("初" in data["audit_type_raw"] and "监" not in data["audit_type_raw"]) else "☐"
+        text = re.sub(r"[□☐☑✔]\s*(初审)", f"{sym} \\1", text)
+    if "监审" in text:
+        sym = "☑" if "监" in data["audit_type_raw"] else "☐"
+        text = re.sub(r"[□☐☑✔]\s*(监审)", f"{sym} \\1", text)
+    if "再认证" in text or "转移" in text:
+        sym = "☑" if ("再认证" in data["audit_type_raw"] or "转移" in data["audit_type_raw"]) else "☐"
+        text = re.sub(r"[□☐☑✔]\s*(再认证/转移)", f"{sym} \\1", text)
+
     if text != p.text:
         p.text = text
 
+def fill_cell_if_empty(cell, value):
+    """安全填充单元格内容"""
+    if not str(value).strip():
+        return
+    cell_text = cell.text.strip()
+    if not cell_text or "{{" in cell_text:
+        if cell.paragraphs:
+            cell.paragraphs[0].text = str(value)
+
+def format_decision_options(cell, data):
+    """处理认证决定结论区域：为所有选项增加前置格子并勾选指定项"""
+    option_paragraphs = [p for p in cell.paragraphs if "通过" in p.text or "不予通过" in p.text]
+    target_idx = data["decision_option"]
+
+    for opt_i, p in enumerate(option_paragraphs, start=1):
+        raw_text = p.text.strip()
+        clean_text = BOX_PATTERN.sub("", raw_text).strip()
+
+        is_selected = (opt_i == target_idx)
+        mark = "☑ " if is_selected else "☐ "
+
+        # 如果选中的是第 1 项且带有范围括号，补全认证范围
+        if opt_i == 1 and "适用于：" in clean_text:
+            prefix = clean_text.split("适用于：")[0]
+            clean_text = f"{prefix}适用于：{data['scope']}）"
+
+        p.text = mark + clean_text
+
 def process_table_safely(table, data):
-    """去重保护合并单元格，仅修改 paragraph.text，不破坏表格框架"""
+    """非破坏性表格遍历与绑定"""
     visited_tcs = set()
 
     for row in table.rows:
         cells = row.cells
         for idx, cell in enumerate(cells):
-            # 防止重复修改合并单元格 (colspan / rowspan)
             if cell._tc in visited_tcs:
                 continue
             visited_tcs.add(cell._tc)
 
             cell_text = cell.text.strip()
-            clean_cell_text = cell_text.replace(" ", "").replace("\n", "")
+            clean_text = cell_text.replace(" ", "").replace("\n", "")
 
-            # 1. 替换单元格内已有的占位符
+            # 1. 替换段落占位符与基础勾选框
             for p in cell.paragraphs:
-                replace_placeholders_in_paragraph(p, data)
+                update_paragraph_checkboxes(p, data)
 
-            # 2. 认证决定结论区域：精准处理第 N 个复选框与评定日期
-            if "认证决定" in clean_cell_text or "决定结论" in clean_cell_text:
-                opt_target = data["decision_option"]
-                if opt_target > 0:
-                    box_count = 0
-                    for p in cell.paragraphs:
-                        if BOX_PATTERN.search(p.text):
-                            def replace_box(m):
-                                nonlocal box_count
-                                box_count += 1
-                                return "☑" if box_count == opt_target else "☐"
-                            p.text = BOX_PATTERN.sub(replace_box, p.text)
-                
-                # 回填评定日期
-                if data["eval_date"]:
-                    for p in cell.paragraphs:
-                        if "日期" in p.text and ("：" in p.text or ":" in p.text or "{{" in p.text):
-                            if "{{" in p.text:
-                                p.text = re.sub(r"\{\{.*?\}\}", data["eval_date"], p.text)
-                            else:
-                                prefix = re.split(r"[:：]", p.text)[0]
-                                p.text = f"{prefix}：{data['eval_date']}"
+            # 2. 精准匹配标签并填入数据
+            if clean_text in ["公司名称", "客户名称", "公司名称：", "客户名称："]:
+                if "：" in cell_text or ":" in cell_text:
+                    cell.paragraphs[0].text = f"公司名称：{data['company_name']}"
+                elif idx + 1 < len(cells):
+                    fill_cell_if_empty(cells[idx + 1], data['company_name'])
 
-            # 3. 模板纯文本绑定（如“公司名称”匹配右侧格子）
-            mappings = [
-                (["公司名称", "客户名称"], data["company_name"]),
-                (["任务号", "合同号"], data["task_no"]),
-                (["审核组长", "组长"], data["lead"]),
-                (["审核地址", "企业地址"], data["address"]),
-                (["审核范围", "认证范围"], data["scope"]),
-            ]
+            elif clean_text in ["任务号", "任务号：", "合同号", "合同号："]:
+                if "：" in cell_text or ":" in cell_text:
+                    cell.paragraphs[0].text = f"任务号：{data['task_no']}"
+                elif idx + 1 < len(cells):
+                    fill_cell_if_empty(cells[idx + 1], data['task_no'])
 
-            for keywords, val in mappings:
-                if any(kw in clean_cell_text for kw in keywords) and val:
-                    # 情况 A: 单元格形如 "公司名称：" 且后方为空
-                    if ("：" in cell_text or ":" in cell_text) and not cell_text.split("：")[-1].strip().split(":")[-1].strip():
-                        prefix = re.split(r"[:：]", cell_text)[0]
-                        if cell.paragraphs:
-                            cell.paragraphs[0].text = f"{prefix}：{val}"
-                    # 情况 B: 当前格为标题，值写在右侧相邻单元格
-                    elif idx + 1 < len(cells):
-                        next_cell = cells[idx + 1]
-                        next_text = next_cell.text.strip()
-                        if not next_text or "{{" in next_text:
-                            if next_cell.paragraphs:
-                                next_cell.paragraphs[0].text = str(val)
+            elif clean_text in ["审核组长", "组长", "审核组长：", "组长："]:
+                if "：" in cell_text or ":" in cell_text:
+                    cell.paragraphs[0].text = f"审核组长：{data['lead']}"
+                elif idx + 1 < len(cells):
+                    fill_cell_if_empty(cells[idx + 1], data['lead'])
+
+            # 处理内嵌多段落的地址和范围
+            for p in cell.paragraphs:
+                p_clean = p.text.replace(" ", "")
+                if "审核地址：" in p_clean or "审核地址:" in p_clean:
+                    p.text = f"审核地址：{data['address']}"
+                elif "认证范围：" in p_clean or "认证范围:" in p_clean:
+                    p.text = f"认证范围：{data['scope']}"
+
+            # 3. 处理认证决定结论格式与前置勾选框
+            if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
+                format_decision_options(cell, data)
 
 def fill_word_template(template_bytes, data):
     doc = Document(io.BytesIO(template_bytes))
 
-    # 1. 替换正文段落
     for p in doc.paragraphs:
-        replace_placeholders_in_paragraph(p, data)
+        update_paragraph_checkboxes(p, data)
 
-    # 2. 遍历表格填充
     for table in doc.tables:
         process_table_safely(table, data)
 
@@ -223,15 +253,15 @@ if excel_file is not None and template_file is not None:
         else:
             st.subheader(f"📋 提取数据预览（共 {len(parsed_records)} 条记录）")
             preview_df = pd.DataFrame(parsed_records)[
-                ["company_name", "task_no", "lead", "audit_type_raw", "decision_option", "eval_date"]
+                ["company_name", "task_no", "lead", "audit_type_raw", "decision_option", "address", "scope"]
             ]
-            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "勾选结论位置", "评定日期"]
+            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "勾选结论选项", "审核地址", "认证范围"]
             
-            preview_df["勾选结论位置"] = preview_df["勾选结论位置"].map({
+            preview_df["勾选结论选项"] = preview_df["勾选结论选项"].map({
                 1: "第 1 项 (初审/再认证)",
                 3: "第 3 项 (转移)",
                 5: "第 5 项 (监一/监二)"
-            }).fillna("未定义")
+            }).fillna("第 1 项")
 
             st.dataframe(preview_df, use_container_width=True)
 
