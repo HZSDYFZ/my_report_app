@@ -18,7 +18,7 @@ def extract_first_person(lead_str):
     s = str(lead_str).strip()
     s = re.sub(r"^(审核组长|组长|Lead)[:：]\s*", "", s, flags=re.IGNORECASE)
     s = re.sub(r"[\（\(].*?[\）\)]", "", s).strip()
-    parts = re.split(r"[ ,,\/、+&\t\n]+", s)
+    parts = re.split(r"[ ,，/、+&\t\n]+", s)
     return parts[0] if parts and parts[0] else ""
 
 def get_clean_col_val(row, possible_keys, default=""):
@@ -136,12 +136,11 @@ def update_paragraph_checkboxes(p, data):
         p.text = text
 
 def fill_next_target_cell(cells, current_idx, value):
-    """【核心修复】基于底层 XML 单元格(_tc)精准定位标签格后面紧挨着的下一个独立单元格"""
+    """基于底层 XML 单元格(_tc)精准定位标签格后面紧挨着的下一个独立单元格（用于审核组长）"""
     if not str(value).strip():
         return
     current_tc = cells[current_idx]._tc
     for next_idx in range(current_idx + 1, len(cells)):
-        # 寻找不属于当前合并单元格的下一个新格子
         if cells[next_idx]._tc != current_tc:
             target_cell = cells[next_idx]
             if target_cell.paragraphs:
@@ -169,7 +168,7 @@ def format_decision_options(cell, data):
         p.text = mark + clean_text
 
 def process_table_safely(table, data):
-    """表格安全遍历，严格保证内容写入标签后一个格子"""
+    """表格安全遍历，严格区分：公司/任务号在同单元格冒号后，组长在后一个格子"""
     visited_tcs = set()
 
     for row in table.rows:
@@ -186,17 +185,19 @@ def process_table_safely(table, data):
             for p in cell.paragraphs:
                 update_paragraph_checkboxes(p, data)
 
-            # 1. 公司名称 -> 填在后面一个格子
+            # 1. 公司名称 -> 填在“公司名称：”后面（同一单元格内）
             if clean_text in ["公司名称", "客户名称", "企业名称"]:
-                fill_next_target_cell(cells, idx, data['company_name'])
+                if cell.paragraphs:
+                    cell.paragraphs[0].text = f"公司名称：{data['company_name']}"
 
-            # 2. 审核组长 -> 填在后面一个格子
+            # 2. 任务号 -> 填在“任务号：”后面（同一单元格内）
+            elif clean_text in ["任务号", "合同号"]:
+                if cell.paragraphs:
+                    cell.paragraphs[0].text = f"任务号：{data['task_no']}"
+
+            # 3. 审核组长 -> 填在后面一个格子里面
             elif (clean_text in ["审核组长", "组长"]) and "报告评定人员" not in clean_text:
                 fill_next_target_cell(cells, idx, data['lead'])
-
-            # 3. 任务号 -> 填在后面一个格子
-            elif clean_text in ["任务号", "合同号"]:
-                fill_next_target_cell(cells, idx, data['task_no'])
 
             # 4. 段落中的地址、范围、日期匹配
             for p in cell.paragraphs:
@@ -214,8 +215,6 @@ def process_table_safely(table, data):
             if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间"]:
                 if "：" in cell_text or ":" in cell_text:
                     cell.paragraphs[0].text = f"日期：{data['eval_date']}"
-                else:
-                    fill_next_target_cell(cells, idx, data['eval_date'])
 
             # 6. 认证决定结论选项勾选
             if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
