@@ -139,7 +139,7 @@ def process_paragraph_text(p, data):
         # 3. 复选框状态更新
         if "16949" in run_text:
             sym = "☑" if data["has_ts"] else "☐"
-            run_text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", run_text, flags=core_re_flags := re.I)
+            run_text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", run_text, flags=re.I)
             modified = True
         if "9001" in run_text:
             sym = "☑" if data["has_er"] else "☐"
