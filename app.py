@@ -135,6 +135,25 @@ def update_paragraph_checkboxes(p, data):
     if text != p.text:
         p.text = text
 
+def fill_next_target_cell(cells, current_idx, value):
+    """【核心规则】严格将数据填入标签格子后面紧挨着的一个或有效空白格子中"""
+    if not str(value).strip():
+        return
+    # 优先寻找紧挨着的下一个单元格
+    if current_idx + 1 < len(cells):
+        target_cell = cells[current_idx + 1]
+        if target_cell.paragraphs:
+            target_cell.paragraphs[0].text = str(value)
+            return
+    # 兜底：如果相邻格被合并或跳过，向后顺延查找第一个可用格
+    for next_idx in range(current_idx + 1, len(cells)):
+        target_cell = cells[next_idx]
+        target_text = target_cell.text.strip()
+        if not target_text or "{{" in target_text or "【" in target_text:
+            if target_cell.paragraphs:
+                target_cell.paragraphs[0].text = str(value)
+                break
+
 def format_decision_options(cell, data):
     """还原认证决定结论格式"""
     option_paragraphs = [p for p in cell.paragraphs if "通过" in p.text or "不予通过" in p.text]
@@ -154,11 +173,12 @@ def format_decision_options(cell, data):
         p.text = mark + clean_text
 
 def process_table_safely(table, data):
-    """【修复】通过直接重写单元格文本，确保公司名称、组长、任务号100%成功生成"""
+    """表格遍历：标签保持不动，将内容准确写入后面一个格子"""
     visited_tcs = set()
 
     for row in table.rows:
-        for cell in row.cells:
+        cells = row.cells
+        for idx, cell in enumerate(cells):
             if cell._tc in visited_tcs:
                 continue
             visited_tcs.add(cell._tc)
@@ -166,46 +186,42 @@ def process_table_safely(table, data):
             cell_text = cell.text.strip()
             clean_text = re.sub(r"[\s:：]", "", cell_text)
 
-            # 先对段落通用占位符进行替换
+            # 先处理单元格内部自带占位符的情况
             for p in cell.paragraphs:
                 update_paragraph_checkboxes(p, data)
 
-            # 1. 直接命中并重写公司名称
-            if "公司名称" in clean_text or "客户名称" in clean_text or "企业名称" in clean_text:
-                if cell.paragraphs:
-                    cell.paragraphs[0].text = f"公司名称: {data['company_name']}"
+            # 1. 公司名称 -> 填在后面一个格子
+            if clean_text in ["公司名称", "客户名称", "企业名称"]:
+                fill_next_target_cell(cells, idx, data['company_name'])
 
-            # 2. 直接命中并重写审核组长
-            elif ("审核组长" in clean_text or clean_text == "组长") and "报告评定人员" not in clean_text:
-                if cell.paragraphs:
-                    cell.paragraphs[0].text = f"审核组长: {data['lead']}"
+            # 2. 审核组长 -> 填在后面一个格子
+            elif (clean_text in ["审核组长", "组长"]) and "报告评定人员" not in clean_text:
+                fill_next_target_cell(cells, idx, data['lead'])
 
-            # 3. 直接命中并重写任务号/合同号
-            elif "任务号" in clean_text or "合同号" in clean_text:
-                if cell.paragraphs:
-                    cell.paragraphs[0].text = f"任务号: {data['task_no']}"
+            # 3. 任务号 -> 填在后面一个格子
+            elif clean_text in ["任务号", "合同号"]:
+                fill_next_target_cell(cells, idx, data['task_no'])
 
-            # 4. 审核地址
-            elif "审核地址" in clean_text:
-                if cell.paragraphs:
-                    cell.paragraphs[0].text = f"审核地址: {data['address']}"
+            # 4. 审核地址（有些模板在段落中，有些在表格单元格）
+            for p in cell.paragraphs:
+                p_clean = re.sub(r"\s+", "", p.text)
+                if "审核地址：" in p_clean or "审核地址:" in p_clean:
+                    p.text = f"审核地址：{data['address']}"
+                elif "认证范围：" in p_clean or "认证范围:" in p_clean:
+                    p.text = f"认证范围：{data['scope']}"
+                elif "日期：" in p_clean and not p_clean.endswith(data['eval_date']):
+                    if any(kw in p_clean for kw in ["报告评定人员", "专业支持人员", "审批"]):
+                        prefix_text = p.text.split("日期：")[0]
+                        p.text = f"{prefix_text}日期：{data['eval_date']}"
 
-            # 5. 认证范围
-            elif "认证范围" in clean_text:
-                if cell.paragraphs:
-                    cell.paragraphs[0].text = f"认证范围: {data['scope']}"
+            # 5. 表格中的单独日期格子处理
+            if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间"]:
+                if "：" in cell_text or ":" in cell_text:
+                    cell.paragraphs[0].text = f"日期：{data['eval_date']}"
+                else:
+                    fill_next_target_cell(cells, idx, data['eval_date'])
 
-            # 6. 日期/评定通过时间
-            elif clean_text in ["日期", "评定日期", "评定通过时间", "评定时间"] or (("日期" in clean_text or "时间" in clean_text) and len(cell_text) < 10):
-                if cell.paragraphs:
-                    if any(kw in cell_text for kw in ["报告评定人员", "专业支持人员", "审批"]):
-                        if "日期" in cell.paragraphs[0].text:
-                            prefix = cell.paragraphs[0].text.split("日期")[0]
-                            cell.paragraphs[0].text = f"{prefix}日期: {data['eval_date']}"
-                    else:
-                        cell.paragraphs[0].text = f"日期: {data['eval_date']}"
-
-            # 7. 认证决定结论选项勾选
+            # 6. 认证决定结论选项勾选
             if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
                 format_decision_options(cell, data)
 
