@@ -56,12 +56,13 @@ def is_real_data_row(row):
 def process_row_data(row, index):
     """单行 Excel 数据解析"""
     company_name = get_clean_col_val(row, ["公司名称", "客户名称", "企业名称", "单位名称", "公司"], default="")
-    task_no = get_clean_col_val(row, ["任务号", "合同号", "项目编号", "单号"], default=f"TASK_{index+1}")
+    task_no = get_clean_col_val(row, ["任务号", "合同号", "项目编号", "单号"], default="")
     lead_raw = get_clean_col_val(row, ["审核组长", "组长", "审核员", "组长姓名", "lead", "姓名"], default="")
     address = get_clean_col_val(row, ["审核地址", "地址", "企业地址", "注册地址"], default="")
     scope = get_clean_col_val(row, ["审核范围", "认证范围", "范围", "业务范围"], default="")
     audit_type_raw = get_clean_col_val(row, ["审核类型", "类型", "审核阶段"], default="")
-    eval_date = get_clean_col_val(row, ["评定日期", "决定日期", "日期", "评审日期"], default="")
+    # 评定通过时间直接读取评定日期
+    eval_date = get_clean_col_val(row, ["评定日期", "决定日期", "日期", "评审日期", "评定时间", "通过时间"], default="")
 
     lead_first = extract_first_person(lead_raw)
 
@@ -91,11 +92,12 @@ def process_row_data(row, index):
     }
 
 def update_paragraph_checkboxes(p, data):
-    """文本框及普通段落替换"""
+    """文本框及普通段落替换（全面替换占位符与勾选项）"""
     text = p.text
     if not text.strip():
         return
 
+    # 1. 占位符精准替换（同时处理模板中可能出现的双花括号与中括号）
     replacements = {
         "{{公司名称}}": data["company_name"],
         "{{任务号}}": data["task_no"],
@@ -103,11 +105,20 @@ def update_paragraph_checkboxes(p, data):
         "{{审核地址}}": data["address"],
         "{{审核范围}}": data["scope"],
         "{{评定日期}}": data["eval_date"],
+        "{{评定通过时间}}": data["eval_date"],
+        "【公司名称】": data["company_name"],
+        "【任务号】": data["task_no"],
+        "【审核组长】": data["lead"],
+        "【审核地址】": data["address"],
+        "【审核范围】": data["scope"],
+        "【评定日期】": data["eval_date"],
+        "【评定通过时间】": data["eval_date"],
     }
     for k, v in replacements.items():
         if k in text:
             text = text.replace(k, str(v))
 
+    # 2. 标准与类型勾选
     if "16949" in text:
         sym = "☑" if data["has_ts"] else "☐"
         text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", text, flags=re.I)
@@ -131,7 +142,7 @@ def fill_cell_if_empty(cell, value):
     if not str(value).strip():
         return
     cell_text = cell.text.strip()
-    if not cell_text or "{{" in cell_text:
+    if not cell_text or "{{" in cell_text or "【" in cell_text:
         if cell.paragraphs:
             cell.paragraphs[0].text = str(value)
 
@@ -154,7 +165,7 @@ def format_decision_options(cell, data):
         p.text = mark + clean_text
 
 def process_table_safely(table, data):
-    """安全遍历表格单元格进行填充，不破坏已有格式"""
+    """安全遍历表格单元格进行填充，不破坏已有格式，强化日期及字段匹配"""
     visited_tcs = set()
 
     for row in table.rows:
@@ -167,45 +178,73 @@ def process_table_safely(table, data):
             cell_text = cell.text.strip()
             clean_text = cell_text.replace(" ", "").replace("\n", "")
 
+            # 先对单元格内所有段落更新占位符
             for p in cell.paragraphs:
                 update_paragraph_checkboxes(p, data)
 
+            # 公司名称
             if clean_text in ["公司名称", "客户名称", "公司名称：", "客户名称："]:
                 if "：" in cell_text or ":" in cell_text:
                     cell.paragraphs[0].text = f"公司名称：{data['company_name']}"
                 elif idx + 1 < len(cells):
                     fill_cell_if_empty(cells[idx + 1], data['company_name'])
 
-            elif clean_text in ["任务号", "任务号：", "合同号", "合同号："]:
+            # 任务号
+            elif clean_text in ["任务号", "合同号", "任务号：", "合同号："]:
                 if "：" in cell_text or ":" in cell_text:
                     cell.paragraphs[0].text = f"任务号：{data['task_no']}"
                 elif idx + 1 < len(cells):
                     fill_cell_if_empty(cells[idx + 1], data['task_no'])
 
+            # 审核组长
             elif clean_text in ["审核组长", "组长", "审核组长：", "组长："]:
                 if "：" in cell_text or ":" in cell_text:
                     cell.paragraphs[0].text = f"审核组长：{data['lead']}"
                 elif idx + 1 < len(cells):
                     fill_cell_if_empty(cells[idx + 1], data['lead'])
 
+            # 日期/评定时间填充（处理尾部签名行的“日期：”）
+            elif clean_text in ["日期", "日期：", "评定日期", "评定日期：", "评定通过时间", "评定时间"]:
+                if "：" in cell_text or ":" in cell_text:
+                    cell.paragraphs[0].text = f"日期：{data['eval_date']}"
+                elif idx + 1 < len(cells):
+                    fill_cell_if_empty(cells[idx + 1], data['eval_date'])
+
+            # 内部段落含有带冒号的文本处理（地址、范围、包含在“日期：”中的行）
             for p in cell.paragraphs:
                 p_clean = p.text.replace(" ", "")
                 if "审核地址：" in p_clean or "审核地址:" in p_clean:
                     p.text = f"审核地址：{data['address']}"
                 elif "认证范围：" in p_clean or "认证范围:" in p_clean:
                     p.text = f"认证范围：{data['scope']}"
+                elif "日期：" in p_clean and not p_clean.endswith(data['eval_date']):
+                    if "专业支持人员" in p_clean or "报告评定人员" in p_clean:
+                        # 保护原有人员名字，将日期补到尾部
+                        if "日期：" in p.text:
+                            prefix_text = p.text.split("日期：")[0]
+                            p.text = f"{prefix_text}日期：{data['eval_date']}"
 
+            # 认证决定结论勾选
             if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
                 format_decision_options(cell, data)
 
 def fill_word_template(template_bytes, data):
     doc = Document(io.BytesIO(template_bytes))
 
+    # 1. 遍历独立段落
     for p in doc.paragraphs:
         update_paragraph_checkboxes(p, data)
 
+    # 2. 遍历表格
     for table in doc.tables:
         process_table_safely(table, data)
+
+    # 3. 遍历页眉和页脚（防止页眉页脚中有公司名称/任务号/日期等占位符未替换）
+    for section in doc.sections:
+        for header_p in section.header.paragraphs:
+            update_paragraph_checkboxes(header_p, data)
+        for footer_p in section.footer.paragraphs:
+            update_paragraph_checkboxes(footer_p, data)
 
     out_stream = io.BytesIO()
     doc.save(out_stream)
@@ -235,9 +274,9 @@ if excel_file is not None and template_file is not None:
         else:
             st.subheader(f"📋 预览数据（共 {len(parsed_records)} 条）")
             preview_df = pd.DataFrame(parsed_records)[
-                ["company_name", "task_no", "lead", "audit_type_raw", "decision_option", "address", "scope"]
+                ["company_name", "task_no", "lead", "audit_type_raw", "decision_option", "address", "scope", "eval_date"]
             ]
-            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "勾选结论选项", "审核地址", "认证范围"]
+            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "勾选结论选项", "审核地址", "认证范围", "评定/通过日期"]
             st.dataframe(preview_df, use_container_width=True)
 
             zip_buffer = io.BytesIO()
