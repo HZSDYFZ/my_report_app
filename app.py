@@ -59,7 +59,7 @@ def clean_date_val(val):
     return val_str.split(" ")[0]
 
 def find_best_column(columns, possible_keys):
-    """智能匹配或返回空"""
+    """智能匹配表头"""
     for key in possible_keys:
         for col in columns:
             col_clean = str(col).replace(" ", "").replace("\n", "").lower()
@@ -74,8 +74,8 @@ def remove_invisible_chars(text):
         return ""
     return re.sub(r'[\u200b\u200c\u200d\u00ad\ufeff]', '', text)
 
-def update_paragraph_checkboxes(p, data):
-    """文本框及普通段落占位符与复选框、日期替换"""
+def process_paragraph_text(p, data):
+    """终极段落文本清洗与替换（强制穿透 Word 拆分项与特殊连字符）"""
     try:
         raw_text = p.text
     except Exception:
@@ -85,6 +85,7 @@ def update_paragraph_checkboxes(p, data):
 
     text = remove_invisible_chars(raw_text)
 
+    # 1. 常规占位符替换
     replacements = {
         "{{公司名称}}": data["company_name"],
         "{{任务号}}": data["task_no"],
@@ -105,11 +106,23 @@ def update_paragraph_checkboxes(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 强制替换 P26-01-15 形式的日期代号
+    # 2. 强力匹配并把预览日期放到“日期：”后面（针对 P26-01-15 等各种变体）
     if data["eval_date"]:
-        text = re.sub(r'P\s*\d{2,4}\s*[-–‑—]\s*\d{2}\s*[-–‑—]\s*\d{2}', data["eval_date"], text, flags=re.I)
-        text = re.sub(r'(日期[：:])\s*([^\s]*)', r'\1' + data["eval_date"], text)
+        # 将所有可能的奇异连字符统一替换为标准减号以便正则稳定捕捉
+        normalized_text = text
+        for dash in ['–', '‑', '—', '−']:
+            normalized_text = normalized_text.replace(dash, '-')
+            
+        # 匹配 P 后面带日期数字的代号（如 P26-01-15）
+        date_pattern = re.compile(r'P\s*\d{2,4}\s*-\s*\d{2}\s*-\s*\d{2}', re.I)
+        if date_pattern.search(normalized_text):
+            text = date_pattern.sub(f"日期：{data['eval_date']}", normalized_text)
+        
+        # 匹配已有“日期：”但后面没填对的情况
+        if "日期" in text:
+            text = re.sub(r'(日期[：:])\s*([^\s]*)', r'\1' + data["eval_date"], text)
 
+    # 3. 复选框状态更新
     if "16949" in text:
         sym = "☑" if data["has_ts"] else "☐"
         text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", text, flags=re.I)
@@ -176,7 +189,7 @@ def process_table_safely(table, data):
             clean_text = re.sub(r"[\s:：]", "", cell_text)
 
             for p in cell.paragraphs:
-                update_paragraph_checkboxes(p, data)
+                process_paragraph_text(p, data)
 
             if clean_text in ["公司名称", "客户名称", "企业名称"]:
                 if cell.paragraphs:
@@ -198,9 +211,7 @@ def process_table_safely(table, data):
 
             if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间", "通过日期"]:
                 if cell.paragraphs and data["eval_date"]:
-                    cell.paragraphs[0].text = re.sub(r"(日期[：:])\s*([^\s]*)", r"\1" + data['eval_date'], cell.paragraphs[0].text)
-                    if "：" not in cell.paragraphs[0].text and ":" not in cell.paragraphs[0].text:
-                        cell.paragraphs[0].text = f"日期：{data['eval_date']}"
+                    cell.paragraphs[0].text = f"日期：{data['eval_date']}"
 
             if "认证决定结论" in clean_text or ("通过" in cell_text and "不予通过" in cell_text):
                 format_decision_options(cell, data)
@@ -210,12 +221,12 @@ def fill_word_template(template_bytes, data):
 
     def process_container(container):
         for p in container.paragraphs:
-            update_paragraph_checkboxes(p, data)
+            process_paragraph_text(p, data)
         for table in container.tables:
             process_table_safely(table, data)
         for p_elem in container._element.xpath('.//w:txbxContent//w:p'):
             p = Paragraph(p_elem, doc)
-            update_paragraph_checkboxes(p, data)
+            process_paragraph_text(p, data)
         for tbl_elem in container._element.xpath('.//w:txbxContent//w:tbl'):
             table = Table(tbl_elem, doc)
             process_table_safely(table, data)
@@ -256,7 +267,7 @@ if excel_file is not None and template_file is not None:
         template_bytes = template_file.getvalue()
         columns = list(raw_df.columns)
 
-        st.subheader("⚙️ Excel 列字段精准映射（确保数据完美提取）")
+        st.subheader("⚙️ Excel 列字段精准映射")
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         with col_m1:
             col_comp = st.selectbox("公司名称列", columns, index=columns.index(find_best_column(columns, ["公司名称", "客户名称", "企业名称", "公司"])))
@@ -265,7 +276,7 @@ if excel_file is not None and template_file is not None:
         with col_m3:
             col_lead = st.selectbox("审核组长列", columns, index=columns.index(find_best_column(columns, ["审核组长", "组长", "审核员"])))
         with col_m4:
-            col_date = st.selectbox("📅 评定日期列 (解决P26-01-15的关键)", columns, index=columns.index(find_best_column(columns, ["评定通过时间", "评定日期", "决定日期", "日期", "评审日期", "时间"])))
+            col_date = st.selectbox("📅 评定日期列", columns, index=columns.index(find_best_column(columns, ["评定通过时间", "评定日期", "决定日期", "日期", "评审日期", "时间"])))
 
         col_m5, col_m6, col_m7 = st.columns(3)
         with col_m5:
@@ -283,7 +294,6 @@ if excel_file is not None and template_file is not None:
             task_val = str(row.get(col_task, ""))
             lead_val = str(row.get(col_lead, ""))
             
-            # 过滤空行
             if pd.isna(row.dropna()).all() or (comp_val.lower() in ["nan", "none", "", "0"] and task_val.lower() in ["nan", "none", "", "0"]):
                 continue
 
