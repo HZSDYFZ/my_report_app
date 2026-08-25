@@ -127,13 +127,14 @@ def process_paragraph_text(p, data):
                 run_text = run_text.replace(k, str(v))
                 modified = True
 
-        # 2. 精准将日期写在“日期：”后面
+        # 2. 精准将日期写在“日期：”后面（并在冒号后自动加一个空格）
         if chinese_date:
             for prefix in ["评定日期", "评审日期", "决定日期", "日期", "评定通过时间"]:
                 if prefix in run_text:
                     pattern = r'(' + prefix + r'\s*[：:])\s*([_—\s]*|\d{4}[年\-\./]\d{1,2}[月\-\./]\d{1,2}日?)'
                     if re.search(pattern, run_text):
-                        run_text = re.sub(pattern, r'\1' + chinese_date, run_text)
+                        # \1 代表标签和冒号，后面加一个空格再接日期
+                        run_text = re.sub(pattern, r'\1 ' + chinese_date, run_text)
                         modified = True
 
         # 3. 复选框状态更新
