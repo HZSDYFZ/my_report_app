@@ -264,17 +264,25 @@ def process_table_safely(table, data):
 def fill_word_template(template_bytes, data):
     doc = Document(io.BytesIO(template_bytes))
 
+    # 1. 处理正文段落
     for p in doc.paragraphs:
         update_paragraph_checkboxes(p, data)
 
+    # 2. 处理正文表格
     for table in doc.tables:
         process_table_safely(table, data)
 
+    # 3. 处理页眉和页脚（包括其中的段落与表格）
     for section in doc.sections:
         for header_p in section.header.paragraphs:
             update_paragraph_checkboxes(header_p, data)
+        for header_tbl in section.header.tables:
+            process_table_safely(header_tbl, data)
+            
         for footer_p in section.footer.paragraphs:
             update_paragraph_checkboxes(footer_p, data)
+        for footer_tbl in section.footer.tables:
+            process_table_safely(footer_tbl, data)
 
     out_stream = io.BytesIO()
     doc.save(out_stream)
