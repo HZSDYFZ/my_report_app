@@ -22,7 +22,7 @@ def extract_first_person(lead_str):
     return parts[0] if parts and parts[0] else ""
 
 def clean_date_val(val):
-    """将 Excel 评定日期序列号、P26-04-01 等格式统一转换为 YYYY-MM-DD 格式"""
+    """将 Excel 日期序列号、P26-04-01 或文本统一转换为 YYYY-MM-DD 格式（兼容所有 Word 连字符）"""
     if pd.isna(val):
         return ""
     if isinstance(val, (pd.Timestamp, datetime)):
@@ -31,13 +31,16 @@ def clean_date_val(val):
     if not val_str or val_str.lower() in ["nan", "none", "null", "nat", "0", "undefined"]:
         return ""
     
-    # 1. 匹配类似 P26-04-01 或 26-04-01 的格式
-    match = re.search(r'P?(\d{2})-(\d{2})-(\d{2})', val_str, re.IGNORECASE)
+    # 兼容标准减号及 Word 各种特殊连字符（-、–、‑、—）
+    match = re.search(r'P?(\d{2,4})[-–‑—](\d{2})[-–‑—](\d{2})', val_str, re.IGNORECASE)
     if match:
-        yy, mm, dd = match.groups()
-        return f"20{yy}-{mm}-{dd}"
+        groups = match.groups()
+        if len(groups[0]) == 4:
+            return f"{groups[0]}-{groups[1]}-{groups[2]}"
+        else:
+            return f"20{groups[0]}-{groups[1]}-{groups[2]}"
 
-    # 2. 处理 Excel 数字日期序列号（如 46113）
+    # 处理 Excel 数字日期序列号（如 46113）
     try:
         f_val = float(val_str)
         if 30000 < f_val < 60000:
@@ -46,7 +49,7 @@ def clean_date_val(val):
     except ValueError:
         pass
     
-    # 3. 尝试直接用 pandas 解析常规日期文本
+    # 尝试用 pandas 解析常规日期文本
     try:
         dt = pd.to_datetime(val_str)
         if not pd.isna(dt):
@@ -95,7 +98,7 @@ def process_row_data(row, index):
     scope = str(get_clean_col_val(row, ["审核范围", "认证范围", "范围", "业务范围"], default=""))
     audit_type_raw = str(get_clean_col_val(row, ["审核类型", "类型", "审核阶段"], default=""))
     
-    eval_date_raw = get_clean_col_val(row, ["评定日期", "决定日期", "日期", "评审日期", "评定时间", "通过时间"], default="")
+    eval_date_raw = get_clean_col_val(row, ["评定通过时间", "评定日期", "决定日期", "日期", "评审日期", "评定时间", "通过时间", "通过日期", "完成日期"], default="")
     eval_date = clean_date_val(eval_date_raw)
 
     lead_first = extract_first_person(lead_raw)
@@ -126,7 +129,7 @@ def process_row_data(row, index):
     }
 
 def update_paragraph_checkboxes(p, data):
-    """文本框及普通段落占位符与复选框、日期替换"""
+    """文本框及普通段落占位符与复选框、日期替换（兼容所有特殊连字符）"""
     text = p.text
     if not text.strip():
         return
@@ -151,10 +154,9 @@ def update_paragraph_checkboxes(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 【核心修复】将模板中写死的 P26-01-15 等旧日期代号直接替换为 Excel 算出的日期
+    # 【精准替换】兼容所有 Word 特殊连字符（如 P26-01-15、P26–01–15 等）
     if data["eval_date"]:
-        text = re.sub(r'P?\d{2}-\d{2}-\d{2}', data["eval_date"], text)
-        # 精准替换“日期：”后面的内容
+        text = re.sub(r'P?\d{2,4}[-–‑—]\d{2}[-–‑—]\d{2}', data["eval_date"], text)
         text = re.sub(r"(日期[：:])\s*([^\s]*)", r"\1" + data["eval_date"], text)
 
     if "16949" in text:
@@ -249,8 +251,8 @@ def process_table_safely(table, data):
                     p.text = f"认证范围：{data['scope']}"
 
             # 5. 表格内的单独日期单元格处理
-            if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间"]:
-                if cell.paragraphs:
+            if clean_text in ["日期", "评定日期", "评定通过时间", "评定时间", "通过日期"]:
+                if cell.paragraphs and data["eval_date"]:
                     cell.paragraphs[0].text = re.sub(r"(日期[：:])\s*([^\s]*)", r"\1" + data['eval_date'], cell.paragraphs[0].text)
                     if "：" not in cell.paragraphs[0].text and ":" not in cell.paragraphs[0].text:
                         cell.paragraphs[0].text = f"日期：{data['eval_date']}"
