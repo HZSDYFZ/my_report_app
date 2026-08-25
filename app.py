@@ -5,6 +5,8 @@ import zipfile
 import pandas as pd
 import streamlit as st
 from docx import Document
+from docx.text.paragraph import Paragraph
+from docx.table import Table
 from datetime import datetime
 
 st.set_page_config(page_title="认证评定报告自动化生成系统", page_icon="📄", layout="wide")
@@ -129,8 +131,11 @@ def process_row_data(row, index):
     }
 
 def update_paragraph_checkboxes(p, data):
-    """文本框及普通段落占位符与复选框、日期替换（兼容所有特殊连字符）"""
-    text = p.text
+    """文本框及普通段落占位符与复选框、日期替换（强制替换所有旧日期代码）"""
+    try:
+        text = p.text
+    except Exception:
+        return
     if not text.strip():
         return
 
@@ -154,14 +159,14 @@ def update_paragraph_checkboxes(p, data):
         if k in text:
             text = text.replace(k, str(v))
 
-    # 【精准替换】兼容所有 Word 特殊连字符（如 P26-01-15、P26–01–15 等）
+    # 【终极强制替换】无论前面带着什么前缀（如“专业支持人员：”或“日期：”），只要匹配到 P26-01-15 等代号，一律原地替换成计算出的正确日期
     if data["eval_date"]:
         text = re.sub(r'P?\d{2,4}[-–‑—]\d{2}[-–‑—]\d{2}', data["eval_date"], text)
         text = re.sub(r"(日期[：:])\s*([^\s]*)", r"\1" + data["eval_date"], text)
 
     if "16949" in text:
         sym = "☑" if data["has_ts"] else "☐"
-        text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", text, flags=re.I)
+        text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", text, flags=I if 'I' in globals() else re.I)
     if "9001" in text:
         sym = "☑" if data["has_er"] else "☐"
         text = re.sub(r"[□☐☑✔]\s*(ISO\s*9001)", f"{sym} \\1", text, flags=re.I)
@@ -224,16 +229,16 @@ def process_table_safely(table, data):
             cell_text = cell.text.strip()
             clean_text = re.sub(r"[\s:：]", "", cell_text)
 
-            # 内部占位符与日期替换
+            # 内部段落替换
             for p in cell.paragraphs:
                 update_paragraph_checkboxes(p, data)
 
-            # 1. 公司名称 -> 填在“公司名称：”后面（同一单元格内）
+            # 1. 公司名称 -> 填在“公司名称：”后面
             if clean_text in ["公司名称", "客户名称", "企业名称"]:
                 if cell.paragraphs:
                     cell.paragraphs[0].text = f"公司名称：{data['company_name']}"
 
-            # 2. 任务号 -> 填在“任务号：”后面（同一单元格内）
+            # 2. 任务号 -> 填在“任务号：”后面
             elif clean_text in ["任务号", "合同号"]:
                 if cell.paragraphs:
                     cell.paragraphs[0].text = f"任务号：{data['task_no']}"
@@ -264,25 +269,47 @@ def process_table_safely(table, data):
 def fill_word_template(template_bytes, data):
     doc = Document(io.BytesIO(template_bytes))
 
-    # 1. 处理正文段落
+    # 1. 处理正文所有段落
     for p in doc.paragraphs:
         update_paragraph_checkboxes(p, data)
 
-    # 2. 处理正文表格
+    # 2. 处理正文所有表格
     for table in doc.tables:
         process_table_safely(table, data)
 
-    # 3. 处理页眉和页脚（包括其中的段落与表格）
+    # 3. 【绝对核心】通过 XML 强行遍历全文所有隐藏在【文本框 (w:txbxContent)】中的段落与表格
+    for p_elem in doc.element.xpath('//w:txbxContent//w:p'):
+        p = Paragraph(p_elem, doc)
+        update_paragraph_checkboxes(p, data)
+    for tbl_elem in doc.element.xpath('//w:txbxContent//w:tbl'):
+        table = Table(tbl_elem, doc)
+        process_table_safely(table, data)
+
+    # 4. 处理页眉和页脚（包括其中的段落、表格及文本框）
     for section in doc.sections:
-        for header_p in section.header.paragraphs:
-            update_paragraph_checkboxes(header_p, data)
-        for header_tbl in section.header.tables:
-            process_table_safely(header_tbl, data)
+        # 页眉
+        for p in section.header.paragraphs:
+            update_paragraph_checkboxes(p, data)
+        for table in section.header.tables:
+            process_table_safely(table, data)
+        for p_elem in section.header.element.xpath('.//w:txbxContent//w:p'):
+            p = Paragraph(p_elem, doc)
+            update_paragraph_checkboxes(p, data)
+        for tbl_elem in section.header.element.xpath('.//w:txbxContent//w:tbl'):
+            table = Table(tbl_elem, doc)
+            process_table_safely(table, data)
             
-        for footer_p in section.footer.paragraphs:
-            update_paragraph_checkboxes(footer_p, data)
-        for footer_tbl in section.footer.tables:
-            process_table_safely(footer_tbl, data)
+        # 页脚
+        for p in section.footer.paragraphs:
+            update_paragraph_checkboxes(p, data)
+        for table in section.footer.tables:
+            process_table_safely(table, data)
+        for p_elem in section.footer.element.xpath('.//w:txbxContent//w:p'):
+            p = Paragraph(p_elem, doc)
+            update_paragraph_checkboxes(p, data)
+        for tbl_elem in section.footer.element.xpath('.//w:txbxContent//w:tbl'):
+            table = Table(tbl_elem, doc)
+            process_table_safely(table, data)
 
     out_stream = io.BytesIO()
     doc.save(out_stream)
