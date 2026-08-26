@@ -87,7 +87,7 @@ def remove_invisible_chars(text):
     return re.sub(r'[\u200b\u200c\u200d\u00ad\ufeff]', '', text)
 
 def process_paragraph_text(p, data):
-    """合并段落内所有 Run 进行全局替换，彻底解决 Word 拆分标签导致的匹配失败问题"""
+    """合并段落内所有 Run，使用通用正则灵活匹配并替换所有 {{ 标签 }}"""
     try:
         full_text = "".join([run.text for run in p.runs])
         if not full_text.strip():
@@ -96,79 +96,67 @@ def process_paragraph_text(p, data):
         return
 
     chinese_date = format_chinese_date(data["eval_date"])
-
-    replacements = {
-        "{{公司名称}}": data["company_name"],
-        "{{ 公司名称 }}": data["company_name"],
-        "{{任务号}}": data["task_no"],
-        "{{ 任务号 }}": data["task_no"],
-        "{{审核组长}}": data["lead"],
-        "{{ 审核组长 }}": data["lead"],
-        "{{审核地址}}": data["address"],
-        "{{ 审核地址 }}": data["address"],
-        "{{审核范围}}": data["scope"],
-        "{{ 审核范围 }}": data["scope"],
-        "{{评定日期}}": chinese_date,
-        "{{ 评定日期 }}": chinese_date,
-        "{{评定通过时间}}": chinese_date,
-        "{{ 评定通过时间 }}": chinese_date,
-        "【公司名称】": data["company_name"],
-        "【任务号】": data["task_no"],
-        "【审核组长】": data["lead"],
-        "【审核地址】": data["address"],
-        "【审核范围】": data["scope"],
-        "【评定日期】": chinese_date,
-        "【评定通过时间】": chinese_date,
-        
-        # 认证标准复选框
-        "{{iatf_check}}": "☑" if data["has_ts"] else "☐",
-        "{{ iatf_check }}": "☑" if data["has_ts"] else "☐",
-        "{{iso_check}}": "☑" if data["has_er"] else "☐",
-        "{{ iso_check }}": "☑" if data["has_er"] else "☐",
-
-        # 审核类型复选框
-        "{{chu_shen}}": "☑" if data["is_initial"] else "☐",
-        "{{ chu_shen }}": "☑" if data["is_initial"] else "☐",
-        "{{jian_shen}}": "☑" if data["is_surveillance"] else "☐",
-        "{{ jian_shen }}": "☑" if data["is_surveillance"] else "☐",
-        "{{zai_ren_zheng}}": "☑" if data["is_recert_transfer"] else "☐",
-        "{{ zai_ren_zheng }}": "☑" if data["is_recert_transfer"] else "☐",
-        "{{te_shu}}": "☑" if data["is_special"] else "☐",
-        "{{ te_shu }}": "☑" if data["is_special"] else "☐",
-
-        # 认证决定结论复选框
-        "{{dec_1}}": "☑" if data["decision_option"] == 1 else "☐",
-        "{{ dec_1 }}": "☑" if data["decision_option"] == 1 else "☐",
-        "{{dec_3}}": "☑" if data["decision_option"] == 3 else "☐",
-        "{{ dec_3 }}": "☑" if data["decision_option"] == 3 else "☐",
-        "{{dec_4}}": "☑" if data["decision_option"] == 4 else "☐",
-        "{{ dec_4 }}": "☑" if data["decision_option"] == 4 else "☐",
-        "{{dec_5}}": "☑" if data["decision_option"] == 5 else "☐",
-        "{{ dec_5 }}": "☑" if data["decision_option"] == 5 else "☐",
-        "{{dec_6}}": "☑" if data["decision_option"] == 6 else "☐",
-        "{{ dec_6 }}": "☑" if data["decision_option"] == 6 else "☐",
-    }
-
-    modified = False
     new_text = remove_invisible_chars(full_text)
 
-    # 1. 替换所有标签字典
-    for k, v in replacements.items():
-        if k in new_text:
-            new_text = new_text.replace(k, str(v))
-            modified = True
+    # 智能标签动态替换函数（兼容各种空格、大小写）
+    def tag_replacer(match):
+        tag_content = match.group(1).strip()
+        tag_lower = tag_content.lower().replace(" ", "")
+        
+        if tag_lower in ["公司名称", "company_name"]:
+            return str(data.get("company_name", ""))
+        elif tag_lower in ["任务号", "task_no"]:
+            return str(data.get("task_no", ""))
+        elif tag_lower in ["审核组长", "lead"]:
+            return str(data.get("lead", ""))
+        elif tag_lower in ["审核地址", "address"]:
+            return str(data.get("address", ""))
+        elif tag_lower in ["审核范围", "scope"]:
+            return str(data.get("scope", ""))
+        elif tag_lower in ["评定日期", "eval_date", "评定通过时间"]:
+            return chinese_date
+        
+        # 认证标准复选框
+        elif tag_lower == "iatf_check":
+            return "☑" if data.get("has_ts") else "☐"
+        elif tag_lower == "iso_check":
+            return "☑" if data.get("has_er") else "☐"
 
-    # 2. 精准将日期写在“日期：”后面
+        # 审核类型复选框
+        elif tag_lower == "chu_shen":
+            return "☑" if data.get("is_initial") else "☐"
+        elif tag_lower == "jian_shen":
+            return "☑" if data.get("is_surveillance") else "☐"
+        elif tag_lower in ["zai_ren_zheng", "zairenzheng"]:
+            return "☑" if data.get("is_recert_transfer") else "☐"
+        elif tag_lower in ["te_shu", "teshu"]:
+            return "☑" if data.get("is_special") else "☐"
+
+        # 认证决定结论复选框 (dec_1 ~ dec_6)
+        elif tag_lower.startswith("dec_"):
+            try:
+                num = int(tag_lower.split("_")[1])
+                return "☑" if data.get("decision_option") == num else "☐"
+            except:
+                pass
+                
+        return match.group(0)  # 未知标签保持原样
+
+    # 执行动态正则替换
+    updated_text = re.sub(r'\{\{([^}]+)\}\}', tag_replacer, new_text)
+    modified = (updated_text != new_text)
+
+    # 补充处理中文字段后的日期填充
     if chinese_date:
         for prefix in ["评定日期", "评审日期", "决定日期", "日期", "评定通过时间"]:
-            if prefix in new_text:
+            if prefix in updated_text:
                 pattern = r'(' + prefix + r'\s*[：:])\s*([_—\s]*|\d{4}[年\-\./]\d{1,2}[月\-\./]\d{1,2}日?)'
-                if re.search(pattern, new_text):
-                    new_text = re.sub(pattern, r'\1 ' + chinese_date, new_text)
+                if re.search(pattern, updated_text):
+                    updated_text = re.sub(pattern, r'\1 ' + chinese_date, updated_text)
                     modified = True
 
     if modified and p.runs:
-        p.runs[0].text = new_text
+        p.runs[0].text = updated_text
         for r in p.runs[1:]:
             r.text = ""
 
@@ -329,29 +317,30 @@ if excel_file is not None and template_file is not None:
             eval_date_raw = row.get(col_date, "") if col_date else ""
             eval_date = clean_date_val(eval_date_raw)
 
-            task_upper = task_no.upper()
+            # 综合检索字符串（把任务号与审核类型拼接起来，提高容错率）
+            combined_str = (audit_type_raw + " " + task_no).upper()
             
-            # 标准勾选判定：兼容任务号或审核类型中的标识
-            has_ts = "TS" in task_upper or "16949" in task_upper or "TS" in audit_type_raw.upper()
-            has_er = "ER" in task_upper or "9001" in task_upper or "9001" in audit_type_raw
+            # 标准勾选判定（兼容 TS / 16949 / IATF / ER / 9001）
+            has_ts = "TS" in combined_str or "16949" in combined_str or "IATF" in combined_str
+            has_er = "ER" in combined_str or "9001" in combined_str or "ISO9001" in combined_str
 
-            # 审核类型勾选判定（增强兼容性）
-            is_initial = "二阶段" in audit_type_raw or "初审" in audit_type_raw or "第1阶段" in audit_type_raw
-            is_surveillance = "监" in audit_type_raw or "监督" in audit_type_raw
-            is_recert_transfer = "再认证" in audit_type_raw or "转换" in audit_type_raw or "转移" in audit_type_raw
-            is_special = "特殊" in audit_type_raw
+            # 审核类型勾选判定（兼容各种初审、监审、再认证、特殊表述）
+            is_initial = "二阶段" in combined_str or "初审" in combined_str or "第1阶段" in combined_str or "第一阶段" in combined_str or "初次" in combined_str
+            is_surveillance = "监" in combined_str or "监督" in combined_str or "SURVEILLANCE" in combined_str
+            is_recert_transfer = "再认证" in combined_str or "转换" in combined_str or "转移" in combined_str or "RECERT" in combined_str
+            is_special = "特殊" in combined_str or "SPECIAL" in combined_str
 
             # 认证决定结论选项判定逻辑
             decision_option = 1  # 默认第一行
-            if "二阶段" in audit_type_raw or "初审" in audit_type_raw or "再认证" in audit_type_raw:
+            if "二阶段" in combined_str or "初审" in combined_str or "再认证" in combined_str:
                 decision_option = 1
-            elif "转移" in audit_type_raw or "转换" in audit_type_raw:
+            elif "转移" in combined_str or "转换" in combined_str:
                 decision_option = 3
-            elif ("监" in audit_type_raw or "监督" in audit_type_raw) and "不换证" in decision_conclusion:
+            elif ("监" in combined_str or "监督" in combined_str) and "不换证" in decision_conclusion:
                 decision_option = 5
-            elif ("监" in audit_type_raw or "监督" in audit_type_raw) and "换发" in decision_conclusion:
+            elif ("监" in combined_str or "监督" in combined_str) and "换发" in decision_conclusion:
                 decision_option = 6
-            elif "特殊" in audit_type_raw and "换发" in decision_conclusion:
+            elif "特殊" in combined_str and "换发" in decision_conclusion:
                 decision_option = 4
 
             parsed_records.append({
@@ -377,9 +366,9 @@ if excel_file is not None and template_file is not None:
         else:
             st.subheader(f"📋 预览数据（共 {len(parsed_records)} 条）")
             preview_df = pd.DataFrame(parsed_records)[
-                ["company_name", "task_no", "lead", "audit_type_raw", "decision_conclusion", "decision_option", "eval_date"]
+                ["company_name", "task_no", "lead", "has_ts", "has_er", "audit_type_raw", "decision_option", "eval_date"]
             ]
-            preview_df.columns = ["公司名称", "任务号", "审核组长", "审核类型", "决定结论", "勾选结论选项", "评定日期"]
+            preview_df.columns = ["公司名称", "任务号", "审核组长", "TS标准勾选", "ER标准勾选", "审核类型", "决定结论选项", "评定日期"]
             st.dataframe(preview_df, use_container_width=True)
 
             zip_buffer = io.BytesIO()
