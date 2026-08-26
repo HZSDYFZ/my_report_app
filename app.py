@@ -96,14 +96,22 @@ def process_paragraph_text(p, data):
 
     chinese_date = format_chinese_date(data["eval_date"])
 
+    # 包含模板中所有可能出现的标签及变体（支持带或不带空格）
     replacements = {
         "{{公司名称}}": data["company_name"],
+        "{{ 公司名称 }}": data["company_name"],
         "{{任务号}}": data["task_no"],
+        "{{ 任务号 }}": data["task_no"],
         "{{审核组长}}": data["lead"],
+        "{{ 审核组长 }}": data["lead"],
         "{{审核地址}}": data["address"],
+        "{{ 审核地址 }}": data["address"],
         "{{审核范围}}": data["scope"],
+        "{{ 审核范围 }}": data["scope"],
         "{{评定日期}}": chinese_date,
+        "{{ 评定日期 }}": chinese_date,
         "{{评定通过时间}}": chinese_date,
+        "{{ 评定通过时间 }}": chinese_date,
         "【公司名称】": data["company_name"],
         "【任务号】": data["task_no"],
         "【审核组长】": data["lead"],
@@ -111,6 +119,34 @@ def process_paragraph_text(p, data):
         "【审核范围】": data["scope"],
         "【评定日期】": chinese_date,
         "【评定通过时间】": chinese_date,
+        
+        # 认证标准复选框
+        "{{iatf_check}}": "☑" if data["has_ts"] else "☐",
+        "{{ iatf_check }}": "☑" if data["has_ts"] else "☐",
+        "{{iso_check}}": "☑" if data["has_er"] else "☐",
+        "{{ iso_check }}": "☑" if data["has_er"] else "☐",
+
+        # 审核类型复选框
+        "{{chu_shen}}": "☑" if data["is_initial"] else "☐",
+        "{{ chu_shen }}": "☑" if data["is_initial"] else "☐",
+        "{{jian_shen}}": "☑" if data["is_surveillance"] else "☐",
+        "{{ jian_shen }}": "☑" if data["is_surveillance"] else "☐",
+        "{{zai_ren_zheng}}": "☑" if data["is_recert_transfer"] else "☐",
+        "{{ zai_ren_zheng }}": "☑" if data["is_recert_transfer"] else "☐",
+        "{{te_shu}}": "☑" if data["is_special"] else "☐",
+        "{{ te_shu }}": "☑" if data["is_special"] else "☐",
+
+        # 认证决定结论复选框
+        "{{dec_1}}": "☑" if data["decision_option"] == 1 else "☐",
+        "{{ dec_1 }}": "☑" if data["decision_option"] == 1 else "☐",
+        "{{dec_3}}": "☑" if data["decision_option"] == 3 else "☐",
+        "{{ dec_3 }}": "☑" if data["decision_option"] == 3 else "☐",
+        "{{dec_4}}": "☑" if data["decision_option"] == 4 else "☐",
+        "{{ dec_4 }}": "☑" if data["decision_option"] == 4 else "☐",
+        "{{dec_5}}": "☑" if data["decision_option"] == 5 else "☐",
+        "{{ dec_5 }}": "☑" if data["decision_option"] == 5 else "☐",
+        "{{dec_6}}": "☑" if data["decision_option"] == 6 else "☐",
+        "{{ dec_6 }}": "☑" if data["decision_option"] == 6 else "☐",
     }
 
     for run in p.runs:
@@ -120,7 +156,7 @@ def process_paragraph_text(p, data):
         
         modified = False
 
-        # 1. 替换常规占位符
+        # 1. 替换所有标签字典
         for k, v in replacements.items():
             if k in run_text:
                 run_text = run_text.replace(k, str(v))
@@ -134,32 +170,6 @@ def process_paragraph_text(p, data):
                     if re.search(pattern, run_text):
                         run_text = re.sub(pattern, r'\1 ' + chinese_date, run_text)
                         modified = True
-
-        # 3. 标准与审核类型复选框状态更新[cite: 4]
-        if "16949" in run_text:
-            sym = "☑" if data["has_ts"] else "☐"
-            run_text = re.sub(r"[□☐☑✔]\s*(IATF\s*16949)", f"{sym} \\1", run_text, flags=re.I)
-            modified = True
-        if "9001" in run_text:
-            sym = "☑" if data["has_er"] else "☐"
-            run_text = re.sub(r"[□☐☑✔]\s*(ISO\s*9001)", f"{sym} \\1", run_text, flags=re.I)
-            modified = True
-        if "初审" in run_text:
-            sym = "☑" if data["is_initial"] else "☐"
-            run_text = re.sub(r"[□☐☑✔]\s*(初审)", f"{sym} \\1", run_text)
-            modified = True
-        if "监审" in run_text:
-            sym = "☑" if data["is_surveillance"] else "☐"
-            run_text = re.sub(r"[□☐☑✔]\s*(监审)", f"{sym} \\1", run_text)
-            modified = True
-        if "再认证" in run_text or "转移" in run_text:
-            sym = "☑" if data["is_recert_transfer"] else "☐"
-            run_text = re.sub(r"[□☐☑✔]\s*(再认证/转移|再认证|转移)", f"{sym} \\1", run_text)
-            modified = True
-        if "特殊" in run_text:
-            sym = "☑" if data["is_special"] else "☐"
-            run_text = re.sub(r"[□☐☑✔]\s*(特殊审核|特殊)", f"{sym} \\1", run_text)
-            modified = True
 
         if modified:
             run.text = run_text
@@ -323,20 +333,20 @@ if excel_file is not None and template_file is not None:
 
             task_upper = task_no.upper()
             
-            # 标准勾选判定：TS/ER 逻辑[cite: 4]
+            # 标准勾选判定：TS/ER 逻辑
             has_ts = "TS" in task_upper and "ER" not in task_upper
             has_er = "ER" in task_upper and "TS" not in task_upper
             if "TS" in task_upper and "ER" in task_upper:
                 has_ts = True
                 has_er = True
 
-            # 审核类型勾选判定[cite: 4]
+            # 审核类型勾选判定
             is_initial = "二阶段" in audit_type_raw
             is_surveillance = "监一" in audit_type_raw or "监二" in audit_type_raw
             is_recert_transfer = "再认证" in audit_type_raw or "转移" in audit_type_raw
             is_special = "特殊" in audit_type_raw
 
-            # 认证决定结论选项判定逻辑[cite: 4]
+            # 认证决定结论选项判定逻辑
             decision_option = 1  # 默认第一行
             if "二阶段" in audit_type_raw or "再认证" in audit_type_raw:
                 decision_option = 1
