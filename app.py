@@ -87,16 +87,16 @@ def remove_invisible_chars(text):
     return re.sub(r'[\u200b\u200c\u200d\u00ad\ufeff]', '', text)
 
 def process_paragraph_text(p, data):
-    """逐个 Run 进行精准替换，绝对不破坏 Word 的排版、Tab 键及右侧表单编号"""
+    """合并段落内所有 Run 进行全局替换，彻底解决 Word 拆分标签导致的匹配失败问题"""
     try:
-        if not p.text.strip():
+        full_text = "".join([run.text for run in p.runs])
+        if not full_text.strip():
             return
     except Exception:
         return
 
     chinese_date = format_chinese_date(data["eval_date"])
 
-    # 包含模板中所有可能出现的标签及变体（支持带或不带空格）
     replacements = {
         "{{公司名称}}": data["company_name"],
         "{{ 公司名称 }}": data["company_name"],
@@ -149,30 +149,28 @@ def process_paragraph_text(p, data):
         "{{ dec_6 }}": "☑" if data["decision_option"] == 6 else "☐",
     }
 
-    for run in p.runs:
-        run_text = remove_invisible_chars(run.text)
-        if not run_text:
-            continue
-        
-        modified = False
+    modified = False
+    new_text = remove_invisible_chars(full_text)
 
-        # 1. 替换所有标签字典
-        for k, v in replacements.items():
-            if k in run_text:
-                run_text = run_text.replace(k, str(v))
-                modified = True
+    # 1. 替换所有标签字典
+    for k, v in replacements.items():
+        if k in new_text:
+            new_text = new_text.replace(k, str(v))
+            modified = True
 
-        # 2. 精准将日期写在“日期：”后面（冒号后自动加一个空格）
-        if chinese_date:
-            for prefix in ["评定日期", "评审日期", "决定日期", "日期", "评定通过时间"]:
-                if prefix in run_text:
-                    pattern = r'(' + prefix + r'\s*[：:])\s*([_—\s]*|\d{4}[年\-\./]\d{1,2}[月\-\./]\d{1,2}日?)'
-                    if re.search(pattern, run_text):
-                        run_text = re.sub(pattern, r'\1 ' + chinese_date, run_text)
-                        modified = True
+    # 2. 精准将日期写在“日期：”后面
+    if chinese_date:
+        for prefix in ["评定日期", "评审日期", "决定日期", "日期", "评定通过时间"]:
+            if prefix in new_text:
+                pattern = r'(' + prefix + r'\s*[：:])\s*([_—\s]*|\d{4}[年\-\./]\d{1,2}[月\-\./]\d{1,2}日?)'
+                if re.search(pattern, new_text):
+                    new_text = re.sub(pattern, r'\1 ' + chinese_date, new_text)
+                    modified = True
 
-        if modified:
-            run.text = run_text
+    if modified and p.runs:
+        p.runs[0].text = new_text
+        for r in p.runs[1:]:
+            r.text = ""
 
 def fill_next_target_cell(cells, current_idx, value):
     """基于底层 XML 单元格定位标签格后面紧挨着的下一个独立单元格"""
@@ -333,28 +331,25 @@ if excel_file is not None and template_file is not None:
 
             task_upper = task_no.upper()
             
-            # 标准勾选判定：TS/ER 逻辑
-            has_ts = "TS" in task_upper and "ER" not in task_upper
-            has_er = "ER" in task_upper and "TS" not in task_upper
-            if "TS" in task_upper and "ER" in task_upper:
-                has_ts = True
-                has_er = True
+            # 标准勾选判定：兼容任务号或审核类型中的标识
+            has_ts = "TS" in task_upper or "16949" in task_upper or "TS" in audit_type_raw.upper()
+            has_er = "ER" in task_upper or "9001" in task_upper or "9001" in audit_type_raw
 
-            # 审核类型勾选判定
-            is_initial = "二阶段" in audit_type_raw
-            is_surveillance = "监一" in audit_type_raw or "监二" in audit_type_raw
-            is_recert_transfer = "再认证" in audit_type_raw or "转移" in audit_type_raw
+            # 审核类型勾选判定（增强兼容性）
+            is_initial = "二阶段" in audit_type_raw or "初审" in audit_type_raw or "第1阶段" in audit_type_raw
+            is_surveillance = "监" in audit_type_raw or "监督" in audit_type_raw
+            is_recert_transfer = "再认证" in audit_type_raw or "转换" in audit_type_raw or "转移" in audit_type_raw
             is_special = "特殊" in audit_type_raw
 
             # 认证决定结论选项判定逻辑
             decision_option = 1  # 默认第一行
-            if "二阶段" in audit_type_raw or "再认证" in audit_type_raw:
+            if "二阶段" in audit_type_raw or "初审" in audit_type_raw or "再认证" in audit_type_raw:
                 decision_option = 1
-            elif "转移" in audit_type_raw:
+            elif "转移" in audit_type_raw or "转换" in audit_type_raw:
                 decision_option = 3
-            elif ("监一" in audit_type_raw or "监二" in audit_type_raw) and "不换证" in decision_conclusion:
+            elif ("监" in audit_type_raw or "监督" in audit_type_raw) and "不换证" in decision_conclusion:
                 decision_option = 5
-            elif ("监一" in audit_type_raw or "监二" in audit_type_raw) and "换发" in decision_conclusion:
+            elif ("监" in audit_type_raw or "监督" in audit_type_raw) and "换发" in decision_conclusion:
                 decision_option = 6
             elif "特殊" in audit_type_raw and "换发" in decision_conclusion:
                 decision_option = 4
